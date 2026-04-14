@@ -1,0 +1,26 @@
+# Calibration datasets for Gemma 4 31B INT4 quantization.
+# Target: ~16,000 samples across text + multimodal JSONL.
+
+[calibration]
+method = "max"
+
+[[dataset]]
+path = "text/agentic_coding_calib_v3.jsonl"
+max_len = 2048
+limit = 4000
+
+[[dataset]]
+path = "text/diverse_calib.jsonl"
+max_len = 2048
+limit = 4000
+
+[[dataset]]
+path = "text/deep_calib.jsonl"
+max_len = 4096
+limit = 4000
+
+[[dataset]]
+path = "multimodal/vqa_calib.jsonl"
+max_len = 2048
+multimodal = true
+limit = 4000

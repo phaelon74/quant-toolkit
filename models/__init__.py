@@ -1,3 +1,4 @@
+from .gemma4_31b import Gemma4_31BConfig
 from .glm5 import Glm5Config
 from .glm5_1 import Glm51Config
 from .minimax_m25 import MinimaxM25Config
@@ -7,6 +8,7 @@ from .qwen3_5_moe import Qwen35MoeConfig
 from .qwen3_5_moe_noshared import Qwen35MoeNoSharedConfig
 
 _CONFIGS = {
+    "gemma4_31b": Gemma4_31BConfig,
     "glm5": Glm5Config,
     "glm5_1": Glm51Config,
     "minimax_m25": MinimaxM25Config,
