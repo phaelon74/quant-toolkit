@@ -342,29 +342,38 @@ Expected log landmarks:
 ### 6.5 Verify the export
 
 ```bash
-python - <<'PY'
-import json
-from pathlib import Path
-p = Path("/media/fmodels2/TheHouseOfTheDude/Behemoth-R1-123B-v2/nvfp4")
-cfg = json.loads((p / "config.json").read_text())
-q = cfg.get("quantization_config", {})
-print("arch      ", cfg.get("architectures"))
-print("algo      ", q.get("quant_algo"))
-print("kv algo   ", q.get("kv_cache_quant_algo"), "<- must be None/absent")
-print("group     ", q.get("group_size"), "<- must be 16 for b12x")
-print("excluded  ", q.get("exclude_modules"))
-print("tokenizer ", (p / "tokenizer.json").exists(), (p / "tokenizer.model").exists())
-PY
+python tools/verify_nvfp4_export.py \
+    /media/fmodels2/TheHouseOfTheDude/Behemoth-R1-123B-v2/nvfp4
 ```
 
-Requirements:
+It reads `config.json`, the index, and tensor *metadata*, loading only the small scale tensors — seconds, no GPU. It must exit 0. What it asserts:
 
-- `kv_cache_quant_algo` **absent or null** — if it says FP8, the KV override did not take
-- `group_size` **16** — b12x hardcodes `sf_vec_size=16`
-- `exclude_modules` contains `q_proj`, `k_proj`, `v_proj`, `lm_head`, `embed_tokens` patterns and **not** `o_proj`
-- tokenizer + `tokenizer_config.json` copied, so the Mistral v7 template survives
+- **No KV cache quantization.** BF16 KV means the key is absent entirely.
+- **`group_size` 16** — b12x hardcodes `sf_vec_size=16`.
+- **Scope**: 88 modules each of `o_proj`/`gate_proj`/`up_proj`/`down_proj` carry `weight` + `weight_scale` + `weight_scale_2` + `input_scale`; all `q_proj`/`k_proj`/`v_proj` plus `lm_head` and `embed_tokens` carry a lone BF16 `weight`.
+- **Every unquantized linear is listed in the exclusion list.** Since `targets` is `["Linear"]`, anything unlisted gets an NVFP4 linear method, hunts for a `weight_scale` that does not exist, and fails at *load*, not at export.
+- **Dtypes**: `U8` packed weights, `F8_E4M3` block scales, `F32` global and input scales.
+- **Scales** finite and not uniformly zero; tokenizer files and chat template present.
 
-vLLM matches `exclude_modules` as **`fnmatch` wildcards**, not prefixes, and returns `UnquantizedLinearMethod` for excluded linears — so a partially quantized NVFP4 checkpoint is a supported configuration, not a hack.
+### Two `quantization_config` layouts
+
+Do not hand-check this with `q.get("group_size")`. ModelOpt ≥ 0.29 emits the **compressed-tensors** layout, where `group_size` is nested in `config_groups.group_0.weights`, exclusions live under `ignore`, and KV quantization would appear as `kv_cache_scheme`. Older releases emit a flat TRT-LLM layout with top-level `group_size` and `exclude_modules`. On 0.46.0 you get the former:
+
+```json
+{
+  "config_groups": {"group_0": {
+      "input_activations": {"num_bits": 4, "type": "float", "group_size": 16},
+      "weights":           {"num_bits": 4, "type": "float", "group_size": 16},
+      "targets": ["Linear"]}},
+  "ignore": ["lm_head", "model.embed_tokens", "model.layers.0.self_attn.q_proj", "..."],
+  "quant_algo": "NVFP4",
+  "quant_method": "modelopt"
+}
+```
+
+Reading the flat keys against this reports false failures on a perfectly good checkpoint — and, far worse, silently misses real FP8 KV, which only ever surfaces as `kv_cache_scheme` here. `tools/verify_nvfp4_export.py` handles both.
+
+For this recipe `ignore` should hold exactly **266** entries: 88 × 3 for `q/k/v_proj`, plus `lm_head` and `model.embed_tokens`. Note these are literal module paths, not wildcards — vLLM `fnmatch`es them, and an exact string matches itself. It returns `UnquantizedLinearMethod` for those, so a partially quantized NVFP4 checkpoint is a supported configuration, not a hack.
 
 ## 7. Serving on vLLM / SM120
 

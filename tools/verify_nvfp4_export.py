@@ -6,17 +6,25 @@ small scale tensors, so it is fast and needs no GPU.
 
 Checks, in order of how expensive they are to discover later:
 
-  1. kv_cache_quant_algo is absent. If it says FP8, the KV override did not
-     take and every cache read is quantized.
+  1. No KV cache quantization. Checked as kv_cache_scheme or
+     kv_cache_quant_algo depending on layout; if either is set, the KV override
+     did not take.
   2. group_size is 16. b12x hardcodes sf_vec_size=16.
   3. Quantization scope: o_proj/gate_proj/up_proj/down_proj carry scales,
      q_proj/k_proj/v_proj/lm_head/embed_tokens do not.
-  4. exclude_modules actually fnmatch-matches every unquantized linear. vLLM
-     matches these as wildcards; a BF16 weight no pattern covers is treated as
-     quantized and fails at load, not at export.
+  4. Every unquantized linear is listed in ignore / exclude_modules. Because
+     targets is ["Linear"], anything unlisted gets an NVFP4 linear method, looks
+     for a weight_scale that does not exist, and fails at load, not at export.
   5. Tensor dtypes are what an NVFP4 export should produce.
   6. Scales are finite, positive, and not uniformly zero.
   7. Tokenizer files survived and the chat template is still present.
+
+Handles both quantization_config layouts. ModelOpt >=0.29 writes the
+compressed-tensors form (group_size nested in config_groups, exclusions under
+"ignore"); older releases write a flat TRT-LLM form with top-level group_size
+and exclude_modules. Reading the wrong one reports false failures on a correct
+checkpoint -- and worse, misses real FP8 KV, which only appears as
+kv_cache_scheme in the compressed-tensors layout.
 
 Usage:
     python tools/verify_nvfp4_export.py /media/fmodels2/working_Model-Opt/smoke
@@ -59,22 +67,51 @@ cfg = json.loads(cfg_path.read_text())
 q = cfg.get("quantization_config") or {}
 line("architectures", cfg.get("architectures"))
 line("num_hidden_layers", cfg.get("num_hidden_layers"))
+line("quant_method", q.get("quant_method"))
 line("quant_algo", q.get("quant_algo"))
 
-kv = q.get("kv_cache_quant_algo")
-line("kv_cache_quant_algo", repr(kv), "<- must be None" if kv is None else "<- WRONG")
-if kv is not None:
-    FAIL.append(f"kv_cache_quant_algo is {kv!r}; the KV cache must stay BF16")
+# Two layouts exist and they put everything in different places.
+# convert_hf_quant_config_format in ModelOpt >=0.29 emits the compressed-tensors
+# form: group_size nested in config_groups, exclusions in "ignore", and KV as
+# "kv_cache_scheme" (added only when kv_cache_quant_algo is truthy, so BF16 KV
+# means the key is absent entirely). The older TRT-LLM form is flat.
+groups = q.get("config_groups") or {}
+if groups:
+    fmt = f"compressed-tensors ({len(groups)} group(s))"
+    g0 = next(iter(groups.values()))
+    group_size = (g0.get("weights") or {}).get("group_size")
+    acts = g0.get("input_activations")
+    targets = g0.get("targets")
+    excludes, exclude_key = q.get("ignore") or [], "ignore"
+    kv, kv_key = q.get("kv_cache_scheme"), "kv_cache_scheme"
+else:
+    fmt = "TRT-LLM flat"
+    group_size = q.get("group_size")
+    acts, targets = None, None
+    excludes, exclude_key = q.get("exclude_modules") or [], "exclude_modules"
+    kv, kv_key = q.get("kv_cache_quant_algo"), "kv_cache_quant_algo"
 
-group = q.get("group_size")
-line("group_size", group, "" if group == 16 else "<- b12x needs 16")
-if group != 16:
-    FAIL.append(f"group_size is {group}, b12x hardcodes sf_vec_size=16")
+line("config layout", fmt)
+if targets is not None:
+    line("targets", targets)
+if groups:
+    line("weight/act precision",
+         f"W4{'A4' if acts else 'A16'}",
+         "" if acts else "<- weight-only, not what this recipe intends")
 
-excludes = q.get("exclude_modules") or []
-line("exclude_modules", f"{len(excludes)} pattern(s)")
-for pattern in excludes:
+line(kv_key, repr(kv), "<- correct, BF16 KV" if not kv else "<- WRONG")
+if kv:
+    FAIL.append(f"{kv_key} is {kv!r}; the KV cache must stay BF16")
+
+line("group_size", group_size, "" if group_size == 16 else "<- b12x needs 16")
+if group_size != 16:
+    FAIL.append(f"group_size is {group_size}, b12x hardcodes sf_vec_size=16")
+
+line(exclude_key, f"{len(excludes)} entr(y/ies)")
+for pattern in excludes[:4]:
     print(f"      {pattern}")
+if len(excludes) > 4:
+    print(f"      ... and {len(excludes) - 4} more")
 
 
 # ---------------------------------------------------------------------------
@@ -134,14 +171,16 @@ for kind in QUANTIZED + UNQUANTIZED:
 
 
 # ---------------------------------------------------------------------------
-# vLLM fnmatches exclude_modules against module names. Anything unquantized and
-# unmatched gets treated as NVFP4 and blows up at load time.
-print("\n=== exclude_modules coverage ===")
+# targets: ["Linear"] means "quantize every Linear except these", so anything
+# unquantized and unlisted gets an NVFP4 linear method, looks for a weight_scale
+# that does not exist, and fails at load rather than at export. Entries may be
+# literal module paths or wildcards; fnmatch handles both.
+print(f"\n=== {exclude_key} coverage ===")
 unquantized = [m for m, p in modules.items() if "weight_scale" not in p and "weight" in p]
 uncovered = [m for m in unquantized
              if not any(fnmatch(m, p) for p in excludes)]
 line("unquantized modules", len(unquantized))
-line("covered by a pattern", len(unquantized) - len(uncovered))
+line("covered", len(unquantized) - len(uncovered))
 if uncovered:
     norms = [m for m in uncovered if "norm" in m.lower()]
     linears = [m for m in uncovered if "norm" not in m.lower()]
@@ -150,8 +189,8 @@ if uncovered:
     if linears:
         for m in linears[:8]:
             print(f"      UNCOVERED: {m}")
-        FAIL.append(f"{len(linears)} unquantized linear(s) match no "
-                    f"exclude_modules pattern; vLLM will treat them as NVFP4")
+        FAIL.append(f"{len(linears)} unquantized linear(s) match no {exclude_key} "
+                    f"entry; vLLM will treat them as NVFP4 and fail at load")
 
 
 # ---------------------------------------------------------------------------
