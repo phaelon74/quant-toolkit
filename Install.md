@@ -479,11 +479,59 @@ export PYTORCH_ALLOC_CONF=expandable_segments:True
 
 **Install vLLM in a separate venv.** vLLM, ModelOpt, and FlashInfer each pin torch, `transformers`, and CUDA-side packages, and they will fight in one environment. Quantization and serving are separate jobs on separate schedules — keep them separate.
 
+Install from a source checkout with `VLLM_USE_PRECOMPILED=1`, which downloads the prebuilt kernel binaries instead of compiling the C++/CUDA extensions. `--torch-backend=auto` lets uv detect the driver and resolve the matching torch build:
+
 ```bash
-python3.12 -m venv ~/.venvs/vllm
-source ~/.venvs/vllm/bin/activate
-pip install --upgrade pip
-pip install vllm
+git clone https://github.com/vllm-project/vllm.git ~/src/vllm
+cd ~/src/vllm
+uv venv --python 3.12 --seed
+source .venv/bin/activate
+
+VLLM_USE_PRECOMPILED=1 uv pip install --editable . --torch-backend=auto
+```
+
+Without `VLLM_USE_PRECOMPILED=1` this compiles the CUDA extensions from scratch — tens of minutes to hours. If you do not need a source checkout, `uv pip install vllm --torch-backend=auto` uses the PyPI wheel directly; add `--only-binary=:all:` to make uv fail loudly rather than silently fall back to the sdist and start compiling.
+
+### The nightly lag trap
+
+The command above frequently fails like this:
+
+```
+Detected CUDA 13.2, using variant cu130
+Upstream main branch latest commit: dffbb714...
+Trying to fetch nightly build metadata from https://wheels.vllm.ai/dffbb714.../cu130/vllm/metadata.json
+urllib.error.HTTPError: HTTP Error 404: Not Found
+RuntimeError: Failed to fetch precompiled wheel metadata for CUDA variant 'cu130' at commit dffbb714...
+```
+
+`setup.py` resolves the latest `main` commit, but **nightly wheel builds lag `main`**, so nothing is published at that SHA yet. The error's "root/default variant is not used as a fallback" line is boilerplate — usually no wheel exists at that commit under any variant.
+
+Find the newest commit that does have your variant, then pin it:
+
+```bash
+# What is actually published for this CUDA variant?
+curl -s https://wheels.vllm.ai/nightly/cu130/vllm/metadata.json | python -m json.tool
+```
+
+Take the commit out of the `path` field and use it for **both** the checkout and the pin:
+
+```bash
+SHA=<commit from the path field>
+git checkout $SHA
+VLLM_USE_PRECOMPILED=1 VLLM_PRECOMPILED_WHEEL_COMMIT=$SHA \
+    uv pip install --editable . --torch-backend=auto
+```
+
+`git checkout $SHA` is required, not tidiness. `VLLM_USE_PRECOMPILED` pairs prebuilt `.so` files with your local Python source tree; if the source sits at `main` while the binaries come from an older commit, Python calls into compiled ops whose signatures have moved and you get import or first-inference failures.
+
+`VLLM_PRECOMPILED_WHEEL_LOCATION=<full wheel url>` skips commit resolution altogether if you already know the wheel.
+
+Variants are built independently, so `nightly/cu129` and `nightly/cu130` generally point at **different** commits. Do not assume they are in sync.
+
+Confirm the versions before serving, because SM120 support depends on them:
+
+```bash
+python -c "import vllm, flashinfer; print(vllm.__version__, flashinfer.__version__)"
 ```
 
 SM120 needs explicit configuration, because the fallback is Marlin W4A16 — which dequantizes FP4 to FP16 and gives up much of the point:
@@ -491,16 +539,40 @@ SM120 needs explicit configuration, because the fallback is Marlin W4A16 — whi
 ```bash
 export FLASHINFER_CUDA_ARCH_LIST=12.0f
 export FLASHINFER_FORCE_SM=120f
-export VLLM_NVFP4_GEMM_BACKEND=flashinfer-b12x
 ```
+
+> **`VLLM_NVFP4_GEMM_BACKEND` is not a real variable on 0.29.x.** Setting it produces
+> `WARNING [envs.py] Unknown vLLM environment variable detected: VLLM_NVFP4_GEMM_BACKEND`
+> and does nothing. Kernel choice now lives in `KernelConfig`, which logs as
+> `linear_backend='auto'`, `linear_backend_per_quant=None` in the engine config dump.
+> Leaving it on `auto` selects a real FP4 kernel; verify which one from the log rather
+> than assuming an env var took effect.
 
 Requirements and traps:
 
 - **A recent vLLM.** Older builds gate NVFP4 kernels behind `is_device_capability_family(100)`, which is `False` for SM120, so they refuse to load or emit garbage.
 - **FlashInfer ≥ 0.6.9** for the `b12x` backend. Kernels are JIT-compiled on first use and cached, so the first request is slow.
-- `nvidia-cutlass-dsl` **is version-sensitive.** vLLM's SM120 integration pinned `4.4.2` (4.5.0 emitted bad PTX for SM121); `sparkinfer` currently asks for `4.6.0`. If you get PTX or JIT errors, this is the first thing to bisect.
+- `nvidia-cutlass-dsl` **is version-sensitive.** Early SM120 integration pinned `4.4.2` (4.5.0 emitted bad PTX for SM121). vLLM 0.29.0 now pins `nvidia-cutlass-dsl[cu13]==4.6.2` — note the `cu13` extra, which is what you want against a CUDA 13.0 driver. Do not upgrade it independently; if you get PTX or JIT errors, this is the first thing to bisect.
+- **vLLM 0.29.0's own pins**, for reference when debugging a resolution conflict: `torch==2.13.0`, `flashinfer-python==0.6.18`, `nvidia-cutlass-dsl[cu13]==4.6.2`. Its torch differs from the quantization venv's `2.14.0+cu130`, which is exactly why these live in separate environments.
+- **FlashInfer JIT-compiles at runtime.** `flashinfer-python` ships as a pure-Python wheel, so kernels are built on first use and then cached — the first request after a cold start is slow, and that is not a fault. The `flashinfer-cubin` package carries prebuilt cubins if you want to avoid it.
 - **Dense models are the good case.** The NVFP4 *MoE* grouped-GEMM path has been broken on SM120. Behemoth is dense and uses the `mm_fp4` dense path, which is what `b12x` was built for.
-- **Confirm the kernel.** Check startup logs for the selected NVFP4 linear kernel. If it names Marlin or `FLASHINFER_CUTLASS`, fix the environment before benchmarking.
+- **Confirm the kernel.** Grep the startup log for `for NVFP4 GEMM`. Observed on this box with vLLM `0.29.1rc1.dev157`:
+
+  ```
+  INFO [__init__.py:1180] Using FlashInferCutlassNvFp4LinearKernel for NVFP4 GEMM
+  ```
+
+  That is a genuine FP4 tensor-core path via FlashInfer/CUTLASS, **not** the Marlin W4A16 dequant fallback, so it is a good result. `Marlin` in that line is the one to fix. Also confirm `quantization=modelopt_fp4` in the engine config and `Enabled custom fusions: act_quant`, which indicates the W4A4 activation-quant path is active.
+- **TP4 on PCIe-only GPUs is communication-bound, not kernel-bound.** With `--tensor-parallel-size 4` and no NVLink, vLLM disables every fast all-reduce path and falls back to PYNCCL:
+
+  ```
+  SymmMemCommunicator: Device capability 12.0 not supported
+  FlashInfer All Reduce is disabled because it is not supported for world_size=4
+  Custom allreduce is disabled because it's not supported on more than two PCIe-only GPUs
+  Using ['PYNCCL'] all-reduce backends
+  ```
+
+  A dense 88-layer model does two all-reduces per layer, so 176 PCIe round-trips per decoded token. Measured single-request decode on the 123B NVFP4 was ~43 tok/s against a memory-bandwidth roofline near 77 tok/s. Before blaming the GEMM, try `--tensor-parallel-size 2` (the 86 GiB checkpoint fits in two 96 GB cards) — halving the all-reduce group can beat TP4 for single-request latency, and two TP2 replicas often beat one TP4 for aggregate throughput.
 
 Serving command and flags: [Behemoth-123B_v2_R1.md §7](Behemoth-123B_v2_R1.md).
 

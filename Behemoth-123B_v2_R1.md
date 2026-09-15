@@ -384,7 +384,9 @@ Load the final directory as a local model. Two things need explicit attention on
 ```bash
 export FLASHINFER_CUDA_ARCH_LIST=12.0f
 export FLASHINFER_FORCE_SM=120f
-export VLLM_NVFP4_GEMM_BACKEND=flashinfer-b12x
+# Do NOT set VLLM_NVFP4_GEMM_BACKEND. It is not a recognised variable on 0.29.x;
+# vLLM logs "Unknown vLLM environment variable detected" and ignores it. Kernel
+# selection is KernelConfig.linear_backend, default 'auto'. See Install.md §11.
 
 vllm serve /media/fmodels2/TheHouseOfTheDude/Behemoth-R1-123B-v2/nvfp4 \
     --served-model-name Behemoth-R1-123B-v2-NVFP4 \
@@ -399,7 +401,17 @@ vllm serve /media/fmodels2/TheHouseOfTheDude/Behemoth-R1-123B-v2/nvfp4 \
 
 Notes on the flags: TP=4 across all four cards; avoid expert parallelism entirely (irrelevant for a dense model, and catastrophic on PCIe anyway). `--max-model-len 65536` is a starting point — 131072 is available but a single full-length sequence is 44 GiB of BF16 KV, so size it to your actual concurrency. Requires a recent vLLM with the SM120 capability-family fixes and FlashInfer ≥ 0.6.9; `nvidia-cutlass-dsl` is version-sensitive on this path.
 
-**Confirm you got b12x.** Check startup logs for the selected NVFP4 linear kernel. If you see Marlin or `FLASHINFER_CUTLASS`, you are leaving performance on the table — fix the env before benchmarking.
+**Confirm the kernel.** Grep the startup log for `for NVFP4 GEMM`. A verified smoke serve on this hardware reported:
+
+```
+INFO [__init__.py:1180] Using FlashInferCutlassNvFp4LinearKernel for NVFP4 GEMM
+INFO [core.py:123] ... quantization=modelopt_fp4 ... kv_cache_dtype=auto
+INFO [compilation.py:336] Enabled custom fusions: act_quant
+```
+
+That is a real FP4 tensor-core path, not the Marlin W4A16 dequant fallback, and `act_quant` fusion confirms W4A4 activation quantization is live. Only `Marlin` in that line indicates a problem. `kv_cache_dtype=auto` resolves to BF16 here, which is what you want.
+
+**The real bottleneck on this box is PCIe, not the kernel.** At TP4 with no NVLink, vLLM disables SymmMem, FlashInfer all-reduce, *and* custom all-reduce, leaving PYNCCL. An 88-layer dense model needs two all-reduces per layer, so 176 PCIe round-trips per token. Measured single-request decode was ~43 tok/s versus a bandwidth roofline near 77. If you want latency, benchmark `--tensor-parallel-size 2` against TP4 — the 86 GiB checkpoint fits in two cards, and a smaller all-reduce group often wins.
 
 At serve time, keep the Mistral v7 template and prefill `<think>` after `[/INST]` for the reasoning phase, exactly as the model card describes. Never substitute a Tekken template or a v3 template without `[SYSTEM_PROMPT]`.
 
