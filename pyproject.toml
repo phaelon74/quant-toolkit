@@ -11,7 +11,9 @@ dependencies = [
     # Pinned to a release, not git HEAD. 0.46.0 is the newest tagged version and
     # is the first this toolkit is verified against for the list-form quant_cfg
     # introduced in 0.44. See Install.md before changing this.
-    "nvidia-modelopt[torch]==0.46.0",
+    # No [torch] extra: 0.46.0 does not define one, and the torch subpackage
+    # ships in the base distribution. Asking for it only emits a warning.
+    "nvidia-modelopt==0.46.0",
     "pillow",
     "protobuf",
     "requests",

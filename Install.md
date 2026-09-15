@@ -35,7 +35,7 @@ Do this on **Linux x86_64 with NVIDIA GPUs**. A Windows checkout is fine for edi
 | ---------------------- | ------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------- |
 | Python                 | **3.12**                             | `requires-python = ">=3.12"`. ModelOpt's own docs call 3.12 the production default; 3.10 support is being dropped.            |
 | PyTorch + torchvision  | **CUDA 13.0 wheels** (`cu130` index) | CUDA 13 covers `sm_120` (RTX PRO 6000 Blackwell). Getting a default-PyPI CPU wheel is the single most common install mistake. |
-| nvidia-modelopt[torch] | `==0.46.0`                           | Newest tagged release. Was previously an unpinned git URL, which is a moving target — see §7.                                 |
+| nvidia-modelopt | `==0.46.0`                           | Newest tagged release. Was previously an unpinned git URL, which is a moving target — see §7. No `[torch]` extra: 0.46.0 does not define one and the torch subpackage is in the base distribution. |
 | transformers           | `==5.5.3`                            | Exact pin in `pyproject.toml`. ModelOpt 0.46's floor is 4.57.                                                                 |
 | Calibration JSONL      | Git LFS under `data/`                | `data/**/*.jsonl` is LFS in `.gitattributes`.                                                                                 |
 
@@ -182,7 +182,7 @@ The `pytorch-cu130` index in `pyproject.toml` is marked `explicit = true`, which
 
 The first command also pulls `setuptools==78.1.0` from the PyTorch mirror, because `--index-url` replaces PyPI for that one invocation. The second command upgrades it to the `>=80` that ModelOpt requires. Confirm with `uv pip show setuptools` if a later step complains.
 
-The second command pulls `nvidia-modelopt[torch]==0.46.0`, `transformers==5.5.3`, `accelerate`, `safetensors`, `sentencepiece`, `protobuf`, `pillow`, and `requests`.
+The second command pulls `nvidia-modelopt==0.46.0`, `transformers==5.5.3`, `accelerate`, `safetensors`, `sentencepiece`, `protobuf`, `pillow`, and `requests`, and upgrades `setuptools` to 84.x.
 
 ### With pip
 
@@ -297,7 +297,7 @@ python tools/check_modelopt.py
 Do not go below 0.43 (you lose `NVFP4_OMLP_ONLY_CFG`, and older releases predate the transformers 5.x export work). If you move to `main` to get `nvfp4_act_headroom`, expect to re-verify §7.4 and pin a commit SHA rather than a branch:
 
 ```toml
-"nvidia-modelopt[torch] @ git+https://github.com/NVIDIA/Model-Optimizer.git@<commit-sha>",
+"nvidia-modelopt @ git+https://github.com/NVIDIA/Model-Optimizer.git@<commit-sha>",
 ```
 
 
@@ -336,7 +336,11 @@ Expected on the reference box:
     unified_export_hf        ok
 ```
 
-Exit code 0 means you are clear to run. Then a CLI smoke check:
+Exit code 0 means you are clear to run.
+
+**Warnings you can ignore.** ModelOpt emits `FutureWarning: torch.jit.script is deprecated` on import — that is internal to ModelOpt and harmless. If you see `warning: The package nvidia-modelopt==0.46.0 does not have an extra named torch` during install, your `pyproject.toml` predates the fix that dropped the `[torch]` extra; the install still succeeds either way.
+
+Then a CLI smoke check:
 
 ```bash
 python quantize.py --help
