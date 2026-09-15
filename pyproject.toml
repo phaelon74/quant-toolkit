@@ -18,11 +18,15 @@ dependencies = [
     "transformers==5.5.3",
 ]
 
-[tool.uv]
-index = [
-    { name = "pytorch-cu130", url = "https://download.pytorch.org/whl/cu130" },
-]
+# explicit = true is required, not cosmetic. Without it uv treats this index as
+# authoritative for every package it happens to mirror -- including setuptools,
+# which it pins at <=78.1.0, below the >=80 that nvidia-modelopt requires. uv
+# then refuses to look at PyPI for it and resolution fails outright.
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true
 
 [tool.uv.sources]
-torch = { index = "pytorch-cu130" }
-torchvision = { index = "pytorch-cu130" }
+torch = [{ index = "pytorch-cu130" }]
+torchvision = [{ index = "pytorch-cu130" }]
