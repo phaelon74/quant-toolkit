@@ -11,12 +11,18 @@ source .venv/bin/activate
 export SAFETENSORS_FAST_GPU=1
 export PYTORCH_ALLOC_CONF=expandable_segments:True
 
+# Without this, piping this script into tee or a log file makes Python
+# block-buffer stdout at 8 KB. tqdm writes to stderr and keeps appearing, so
+# the run looks hung after "Loading weights" while every print sits in the
+# buffer -- for a 2,138-batch run the progress lines may never flush.
+export PYTHONUNBUFFERED=1
+
 SRC=/media/fmodels/TheDrummer/Behemoth-R1-123B-v2
 WORK=/media/fmodels2/working_Model-Opt/Behemoth-R1-123B-v2-nvfp4
 FINAL=/media/fmodels2/TheHouseOfTheDude/Behemoth-R1-123B-v2/nvfp4
 CALIB=data/text/behemoth_r1_123b_calib
 
-# Two files: 14,800 samples at 4096 and 1,200 long-form at 8192.
+# Two files: 14,704 samples at 4096 and 1,200 long-form at 8192.
 for len in 4096 8192; do
     if [ ! -f "${CALIB}_${len}.jsonl" ]; then
         echo "Missing ${CALIB}_${len}.jsonl — build the calibration set first:"

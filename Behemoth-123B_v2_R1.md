@@ -149,17 +149,21 @@ That combination gives clipped activation scales *and* swept weight scales. Guar
 
 Your point stands: the shipped mix (16,329 diverse + 15,264 coding + 819 long-context + 23,458 generic coding) is wrong for a creative-writing/RP finetune. Coding was the majority of it.
 
-New spec: **`data/behemoth_r1_123b_calib.yaml`** — 16,000 samples across 42 sources, at exactly the split you asked for.
+New spec: **`data/behemoth_r1_123b_calib.yaml`** — 16,000 samples across 39 sources, at exactly the split you asked for. A real build collects 16,000/16,000 and keeps **15,904** after truncation and the short-sample filter.
 
 | Bucket | Samples | Share | Leading sources |
 | --- | ---: | ---: | --- |
-| Creative writing | 9,600 | 60% | Opus-WritingPrompts, euclaise/writingprompts, ChatGPT-4o-Writing-Prompts, gutenberg3, nopm_claude_writing, Prosemaxx-Adventure, bookcorpusopen, US-PD-Books, movie scripts, poetry |
-| — of which long-form | 1,200 | — | bookcorpusopen, US-PD-Books, movie scripts, run at **8192** rather than 4096 |
-| Roleplay | 3,200 | 20% | Sonnet3.5-Charcard-Roleplay, stheno-filtered, kalo-opus-no-refusal, PIPPA, persona-chat, Kinomaxx-VanillaBackrooms |
+| Creative writing | 9,600 | 60% | Opus-WritingPrompts, euclaise/writingprompts, ChatGPT-4o-Writing-Prompts, gutenberg3, nopm_claude_writing, writingPromptAug, Prosemaxx-Adventure, bookcorpusopen, movie scripts, poetry |
+| — of which long-form | 1,200 | — | bookcorpusopen, movie scripts, run at **8192** rather than 4096 |
+| Roleplay | 3,200 | 20% | Sonnet3.5-Charcard-Roleplay, stheno-filtered, kalo-opus-no-refusal, Roleplay-Anime-Characters, Kinomaxx-VanillaBackrooms |
 | General reasoning | 1,600 | 10% | OpenThoughts-114k, OpenMathReasoning (cot), NuminaMath-CoT, OpenScienceReasoning-2, theory-of-mind, physical-reasoning |
 | General breadth | 1,600 | 10% | ultrachat, dolly, no_robots, neuralmagic/calibration, philosophy, SocraticChat, HelpSteer, medical, legal, finance, multilingual |
 
-Every source is taken from your own validated specs in `data/examples/`, with the same `columns` and `formatter` values, so nothing here is an untested dataset ID.
+Sources are drawn from your own specs in `data/examples/`, but the `columns` and `formatter` values there are **not** all correct, so they were re-verified against the Hub with `tools/check_calib_spec.py`. Three entries had column names that do not exist (silently yielding 0 samples), two exceeded their split size, one was a script-based repo `datasets` v4 cannot load, and `storytracer/US-PD-Books` turned out to hold no text at all — only metadata and an archive.org URL, so it produced 400 book *titles*. Run the validator after any edit to the YAML:
+
+```bash
+python tools/check_calib_spec.py --yaml data/behemoth_r1_123b_calib.yaml
+```
 
 The book and screenplay sources carry a per-entry `max_seq_length: 8192`. `quantize.py` sets `max_len` per `[[dataset]]`, so the builder emits one JSONL per distinct length and the TOML references both. Sample counts and the 60/20/10/10 split are untouched — only the token budget shifts, from a 65.5M ceiling to 70.5M.
 
@@ -224,7 +228,11 @@ python tools/build_calib_from_yaml.py \
     --think-tag think
 ```
 
-This writes `..._4096.jsonl` (14,800) and `..._8192.jsonl` (1,200), and prints the matching `[[dataset]]` blocks. Expect some sources to be skipped (gated, renamed, or moved splits) — the builder warns and continues. Then check what you got:
+This writes `..._4096.jsonl` (14,704) and `..._8192.jsonl` (1,200), and prints the matching `[[dataset]]` blocks plus a bucket-mix report. A healthy run reports `Collected 16000/16000; kept 15904`, with the mix within a tenth of a point of 60/20/10/10.
+
+Watch for two things in that output. A `<< SHORT` marker means a source could not fill its quota — run `tools/check_calib_spec.py` to find out why. And the truncation count (~1,800) is expected, not a warning: it is mostly the long-form slice being cut to the character budget, which is the intended behaviour.
+
+Then check what you got:
 
 ```bash
 wc -l data/text/behemoth_r1_123b_calib_*.jsonl
@@ -243,7 +251,11 @@ for path in sorted(glob.glob("data/text/behemoth_r1_123b_calib_*.jsonl")):
 PY
 ```
 
-`roles` must contain only `system`, `user`, `assistant`. If you land far short of 16,000, raise `num_samples` on the sources that did succeed rather than adding new dataset IDs.
+`roles` must contain only `system`, `user`, `assistant` — anything else means Behemoth's Mistral v7 template will raise during calibration. The `<think>` count should be a few thousand, coming from the reasoning slice.
+
+If you land far short of 16,000, raise `num_samples` on sources the validator confirms have headroom rather than adding new dataset IDs.
+
+At `--batch-tokens 32768` this plan becomes **2,138 batches**: 1,838 at batch 8 / maxlen 4096, and 300 at batch 4 / maxlen 8192. That number is worth writing down — it is what the progress counter divides by.
 
 ### 6.3 Smoke run first
 
@@ -263,15 +275,36 @@ sed -e 's/behemoth_r1_123b_calib_/behemoth_smoke_/' \
     -e '/weight_scale_method/d' \
     configs/calib_behemoth_r1_123b.toml > configs/calib_behemoth_smoke.toml
 
-python quantize.py \
+python -u quantize.py \
     --model behemoth_r1_123b \
     --model-id /media/fmodels/TheDrummer/Behemoth-R1-123B-v2 \
     --export-dir /media/fmodels2/working_Model-Opt/smoke \
     --calib-config configs/calib_behemoth_smoke.toml \
-    --batch-tokens 32768
+    --batch-tokens 32768 2>&1 | tee /media/fmodels2/working_Model-Opt/smoke.log
 ```
 
-This proves model load, chat templating, quantizer placement, calibration, **and export** in a few hours instead of finding an export bug on day three. Then re-run the smoke config with the algorithm you actually intend to use (`mse`, or `nvfp4_act_headroom` if the probe found it) to confirm ModelOpt accepts it *and* that `--resume-amax` still writes usable checkpoints under it.
+> **`-u` is not optional when piping.** Piped stdout is block-buffered at 8 KB, while tqdm writes to stderr and keeps updating — so the run looks hung after `Loading weights: 100%` while the dtype table and every `Batch i/N` line sit unflushed. The whole smoke run emits under 2 KB, so without `-u` you may see nothing until it exits.
+
+Two other things that look like faults but are not. `nvidia-smi` will show low, spiky per-GPU utilization: `device_map="auto"` gives **pipeline** parallelism, so one GPU computes while the other three wait. And host RSS stays near 3 GB because the weights live in VRAM, not system RAM.
+
+That is **72 batches** (56 + 16), about 3.4% of the full run's 2,138, and it proves model load, chat templating, quantizer placement, calibration **and export** — instead of finding an export bug on day three. Verify the result with §6.5 before going further; a smoke export with the wrong layer scope is the cheapest possible place to catch that.
+
+Then re-run the same smoke config with the algorithm you actually intend to use, this time saving amaxes, to settle the `--resume-amax` question from §4 before it matters:
+
+```bash
+sed -i 's/^method = .*/method = "mse"/' configs/calib_behemoth_smoke.toml
+
+mkdir -p /media/fmodels2/working_Model-Opt/smoke_mse
+python -u quantize.py \
+    --model behemoth_r1_123b \
+    --model-id /media/fmodels/TheDrummer/Behemoth-R1-123B-v2 \
+    --export-dir /media/fmodels2/working_Model-Opt/smoke_mse \
+    --calib-config configs/calib_behemoth_smoke.toml \
+    --batch-tokens 32768 \
+    --save-amax /media/fmodels2/working_Model-Opt/smoke_mse/amax.safetensors
+```
+
+Two things to confirm: ModelOpt accepts the `mse` algorithm dict, and `amax.safetensors` is written and non-empty. Note that `mse`'s weight sweep runs *after* all batches and its cost scales with parameter count, not sample count — so whatever it adds here, it adds to the full run too.
 
 ### 6.4 Full run
 
