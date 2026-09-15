@@ -213,9 +213,9 @@ Not in `pyproject.toml`, but needed by specific tools:
 # Required for the Behemoth recipe (tools/build_calib_from_yaml.py).
 uv pip install datasets pyyaml
 
-# Faster Hugging Face downloads (see section 9 for tokens and caveats)
-uv pip install "huggingface_hub[hf_transfer]"
-export HF_HUB_ENABLE_HF_TRANSFER=1
+# Faster Hugging Face downloads: nothing to install on huggingface_hub 1.x,
+# the Xet backend ships with it. See section 9. Do NOT use hf_transfer.
+export HF_XET_HIGH_PERFORMANCE=1
 
 # KV-scale live-server helper (tools/kv_calib_requests.py)
 uv pip install aiohttp
@@ -412,21 +412,38 @@ hf auth whoami         # confirm
 
 Keep the token out of the repo. It is a bearer credential — anything holding it can read your private repos. Use `~/.bashrc` or the on-disk login, never a committed file, and never `--token` on a command line that lands in shell history.
 
-### Faster downloads
+### Faster downloads — use Xet, not `hf_transfer`
 
-Independent of auth, and the bigger win on a fast link. `hf_transfer` is a Rust downloader that parallelises chunks instead of streaming a single connection:
+**`hf_transfer` is obsolete.** `huggingface_hub` 1.x removed it in favour of Xet, a content-addressed chunked backend that dedupes at the chunk level. `HF_HUB_ENABLE_HF_TRANSFER` is now a no-op that only raises a `DeprecationWarning`, and `uv pip install "huggingface_hub[hf_transfer]"` is a no-op too — the extra no longer exists, so uv reports `Checked 1 package` and installs nothing.
 
-```bash
-uv pip install "huggingface_hub[hf_transfer]"
-export HF_HUB_ENABLE_HF_TRANSFER=1
+Xet needs no setup: `hf_xet` is a dependency of `huggingface_hub` 1.x, so it is already in your venv and already active. You can see it working in the builder's output — the two-phase progress line is Xet reconstructing a file from deduped chunks:
+
+```
+movies.json: downloading bytes:     |  107MB, 8.63MB/s
+movies.json: reconstructing file:   |  246MB / 246MB, 21.0MB/s
 ```
 
-It saturates multi-gigabit connections where the default client plateaus. Two caveats: progress reporting gets coarser, and it does **not** resume partial downloads — an interrupted large file restarts. On a flaky link, leave it off for the 229 GB model pull and enable it for the many-small-files dataset build.
+107 MB transferred for a 246 MB file: dedupe saved 57% before any tuning.
 
-If you see timeouts on large shards rather than slow throughput, raise the ceiling instead:
+To raise concurrency, set the replacement variable:
+
+```bash
+export HF_XET_HIGH_PERFORMANCE=1
+```
+
+That trades RAM, CPU and connection count for throughput. Fine on this box; drop it if you are sharing a link or running the build alongside a quantization job.
+
+If you see timeouts on large shards rather than slow throughput, that is a different problem — raise the ceiling instead:
 
 ```bash
 export HF_HUB_DOWNLOAD_TIMEOUT=60      # seconds per chunk, default 10
+```
+
+Verify all of the above in one shot; the builder prints its own auth and transfer state in the run header:
+
+```
+hf auth: <username>
+transfer: xet (high performance)
 ```
 
 ### Runtime environment variables
@@ -520,6 +537,8 @@ Serving command and flags: [Behemoth-123B_v2_R1.md §7](Behemoth-123B_v2_R1.md).
 | `429 Too Many Requests` mid dataset build                   | Anonymous rate limit. Set `HF_TOKEN` and re-run; cached sources are skipped (§9).                                                                      |
 | Dataset build reports `!! skip <name>: ... 401`             | Same as above, but note the builder *continues* — that source contributes 0 samples. Check the mix report before quantizing.                            |
 | `Dataset scripts are no longer supported, but found *.py`   | `datasets` v4 dropped script-based loaders. Try `revision: refs/convert/parquet`, or drop the source and redistribute its `num_samples`.                |
+| `uv pip install "huggingface_hub[hf_transfer]"` → `Checked 1 package`, installs nothing | Correct behaviour. The extra was removed in `huggingface_hub` 1.x. Use Xet instead (§9).                                     |
+| `DeprecationWarning: HF_HUB_ENABLE_HF_TRANSFER ... deprecated` | Unset it and export `HF_XET_HIGH_PERFORMANCE=1` (§9).                                                                                                |
 | OOM during calibration                                      | Lower `--batch-tokens` (try 16384). Only add `--streaming` if the model genuinely does not fit; raise `--cpu-capacity` only if you truly have the RAM. |
 | ImportError from `modelopt.torch.export.*` at export time   | Version drift in the internals from §7.4. Run the probe; pin back to 0.46.0.                                                                           |
 | KV cache exported as FP8 when you wanted BF16               | The adapter inherited `COMMON_QUANT_OVERRIDES`, which enables FP8 KV. See §10.                                                                         |

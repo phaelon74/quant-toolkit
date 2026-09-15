@@ -137,10 +137,17 @@ def hub_status() -> list:
         except Exception as exc:
             out.append(f"hf auth: token present but rejected ({type(exc).__name__})")
 
+    # huggingface_hub 1.x dropped hf_transfer for Xet. HF_HUB_ENABLE_HF_TRANSFER
+    # is now a no-op that only emits a DeprecationWarning.
     if os.environ.get("HF_HUB_ENABLE_HF_TRANSFER") == "1":
-        ok = importlib.util.find_spec("hf_transfer") is not None
-        out.append("hf_transfer: enabled" if ok
-                   else "hf_transfer: HF_HUB_ENABLE_HF_TRANSFER=1 but package missing")
+        out.append("transfer: HF_HUB_ENABLE_HF_TRANSFER is deprecated and ignored — "
+                   "use HF_XET_HIGH_PERFORMANCE=1")
+
+    if importlib.util.find_spec("hf_xet") is None:
+        out.append("transfer: hf_xet missing — falling back to plain HTTP")
+    else:
+        fast = os.environ.get("HF_XET_HIGH_PERFORMANCE") == "1"
+        out.append(f"transfer: xet{' (high performance)' if fast else ''}")
     return out
 
 
