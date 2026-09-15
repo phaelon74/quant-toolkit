@@ -213,7 +213,7 @@ Not in `pyproject.toml`, but needed by specific tools:
 # Required for the Behemoth recipe (tools/build_calib_from_yaml.py).
 uv pip install datasets pyyaml
 
-# Faster Hugging Face downloads
+# Faster Hugging Face downloads (see section 9 for tokens and caveats)
 uv pip install "huggingface_hub[hf_transfer]"
 export HF_HUB_ENABLE_HF_TRANSFER=1
 
@@ -385,7 +385,49 @@ hf cache scan                    # or: huggingface-cli scan-cache
 
 The cache is disposable once the JSONL exists — the quantization run reads only `data/text/*.jsonl`. To cut the download instead of the cleanup, add `streaming: true` to the heavy entries in the YAML; the builder honours it per source and samples from a shuffle buffer rather than the full corpus.
 
-Behemoth is **not** gated. Some models (Mistral base, certain Gemma/Qwen) need `huggingface-cli login`.
+### Hugging Face token
+
+Not required for this toolkit. Behemoth is not gated, and the Behemoth calibration spec builds end-to-end anonymously. Add a token anyway if you are building calibration sets — it buys three things:
+
+1. **Higher rate limits.** The Behemoth spec touches 40 dataset repos and thousands of individual files. Anonymous traffic is throttled harder, and a mid-build `429` costs you the sources that had not been reached yet.
+2. **Gated sources.** Several research corpora (some `nvidia/*` sets, `PygmalionAI/PIPPA`) require accepting terms on the repo page while signed in. Anonymously they fail with `401`, which the builder reports as `!! skip` and walks past — so you lose the slice silently.
+3. **Pushing results.** Needed only if you upload the finished NVFP4 model.
+
+A **read**-scoped token from <https://huggingface.co/settings/tokens> is enough. Write scope only if you plan to upload.
+
+Two ways to supply it. Env var, which every library reads automatically and which is the better fit for scripted runs:
+
+```bash
+export HF_TOKEN=hf_xxxxxxxxxxxxxxxxxxxxxxxx   # add to ~/.bashrc
+```
+
+Or log in once and let it persist to disk:
+
+```bash
+hf auth login          # older builds: huggingface-cli login
+hf auth whoami         # confirm
+```
+
+> **Set `HF_HOME` first.** `hf auth login` writes the token to `$HF_HOME/token`. Exporting `HF_HOME` afterwards points the libraries at a different directory and your login appears to vanish.
+
+Keep the token out of the repo. It is a bearer credential — anything holding it can read your private repos. Use `~/.bashrc` or the on-disk login, never a committed file, and never `--token` on a command line that lands in shell history.
+
+### Faster downloads
+
+Independent of auth, and the bigger win on a fast link. `hf_transfer` is a Rust downloader that parallelises chunks instead of streaming a single connection:
+
+```bash
+uv pip install "huggingface_hub[hf_transfer]"
+export HF_HUB_ENABLE_HF_TRANSFER=1
+```
+
+It saturates multi-gigabit connections where the default client plateaus. Two caveats: progress reporting gets coarser, and it does **not** resume partial downloads — an interrupted large file restarts. On a flaky link, leave it off for the 229 GB model pull and enable it for the many-small-files dataset build.
+
+If you see timeouts on large shards rather than slow throughput, raise the ceiling instead:
+
+```bash
+export HF_HUB_DOWNLOAD_TIMEOUT=60      # seconds per chunk, default 10
+```
 
 ### Runtime environment variables
 
@@ -474,7 +516,10 @@ Serving command and flags: [Behemoth-123B_v2_R1.md §7](Behemoth-123B_v2_R1.md).
 | `No module named ...calib.quantile`                         | Expected. Use `--calib-method max` or `mse` (§7.3).                                                                                                    |
 | Validation error on `method = "nvfp4_act_headroom"`         | Not in your build. Use `mse`. The probe reports this.                                                                                                  |
 | `Unknown model config`                                      | Adapter not registered in `models/__init__.py`.                                                                                                        |
-| `huggingface_hub` 401                                       | `huggingface-cli login` for gated models.                                                                                                              |
+| `huggingface_hub` 401 / 403                                 | Gated repo. Export `HF_TOKEN` or run `hf auth login`, then accept the terms on the repo page while signed in (§9).                                      |
+| `429 Too Many Requests` mid dataset build                   | Anonymous rate limit. Set `HF_TOKEN` and re-run; cached sources are skipped (§9).                                                                      |
+| Dataset build reports `!! skip <name>: ... 401`             | Same as above, but note the builder *continues* — that source contributes 0 samples. Check the mix report before quantizing.                            |
+| `Dataset scripts are no longer supported, but found *.py`   | `datasets` v4 dropped script-based loaders. Try `revision: refs/convert/parquet`, or drop the source and redistribute its `num_samples`.                |
 | OOM during calibration                                      | Lower `--batch-tokens` (try 16384). Only add `--streaming` if the model genuinely does not fit; raise `--cpu-capacity` only if you truly have the RAM. |
 | ImportError from `modelopt.torch.export.*` at export time   | Version drift in the internals from §7.4. Run the probe; pin back to 0.46.0.                                                                           |
 | KV cache exported as FP8 when you wanted BF16               | The adapter inherited `COMMON_QUANT_OVERRIDES`, which enables FP8 KV. See §10.                                                                         |

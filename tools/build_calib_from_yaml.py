@@ -16,7 +16,9 @@ chat_completion, raw_text.
 """
 
 import argparse
+import importlib.util
 import json
+import os
 import random
 import re
 
@@ -116,6 +118,30 @@ def coerce_messages(raw) -> list | None:
         if role and content:
             out.append({"role": role, "content": content})
     return out or None
+
+
+def hub_status() -> list:
+    """Describe hub auth and transfer settings, so a silent 401 is visible."""
+    out = []
+    try:
+        from huggingface_hub import get_token, whoami
+    except ImportError:
+        return ["hf auth: huggingface_hub not installed"]
+
+    if not get_token():
+        out.append("hf auth: anonymous — gated sources will be skipped, and 40 "
+                   "repos may hit the rate limit")
+    else:
+        try:
+            out.append(f"hf auth: {whoami()['name']}")
+        except Exception as exc:
+            out.append(f"hf auth: token present but rejected ({type(exc).__name__})")
+
+    if os.environ.get("HF_HUB_ENABLE_HF_TRANSFER") == "1":
+        ok = importlib.util.find_spec("hf_transfer") is not None
+        out.append("hf_transfer: enabled" if ok
+                   else "hf_transfer: HF_HUB_ENABLE_HF_TRANSFER=1 but package missing")
+    return out
 
 
 def truncate_messages(msgs: list, budget: int) -> list:
@@ -262,7 +288,10 @@ def main():
     default_len = int(spec.get("max_seq_length", 4096))
     print(f"Spec: {args.yaml}")
     print(f"  {len(entries)} sources, {planned} samples planned, seed={seed}")
-    print(f"  default max_seq_length={default_len}\n")
+    print(f"  default max_seq_length={default_len}")
+    for note in hub_status():
+        print(f"  {note}")
+    print()
 
     samples = []
     for entry in entries:
