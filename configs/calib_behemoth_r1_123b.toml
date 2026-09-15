@@ -1,0 +1,43 @@
+# Calibration for TheDrummer/Behemoth-R1-123B-v2 (dense Mistral Large 2411 tune).
+#
+# Build the JSONL first:
+#   python tools/build_calib_from_yaml.py \
+#       --yaml data/behemoth_r1_123b_calib.yaml \
+#       --output data/text/behemoth_r1_123b_calib.jsonl \
+#       --think-tag think
+#
+# 16,000 samples: 60% creative writing, 20% roleplay,
+# 10% general reasoning (with <think> traces), 10% general breadth.
+
+[calibration]
+# Max-calibrates everything, then refines each NVFP4 weight block by sweeping
+# the 126 candidate FP8-E4M3 block scales (Triton-accelerated) instead of
+# taking the plain max. Present in ModelOpt 0.46.0, the pinned release.
+method = "mse"
+
+# Better option IF `python tools/check_modelopt.py` reports act_headroom as
+# available (newer ModelOpt than 0.46.0). It clips activation global scales
+# above upper_percentile instead of letting one outlier block drive every other
+# block's FP8 scale subnormal -- which is exactly the down_proj problem.
+#   method = "nvfp4_act_headroom"
+#   upper_percentile = 99.99
+#   rho = 16384.0
+#   weight_scale_method = "mse"
+#
+# Guaranteed-safe fallback if anything above is rejected:
+#   method = "max"
+#
+# Do NOT set method = "quantile". That calibrator is not in upstream ModelOpt
+# (calibrator is validated against ["max", "histogram"]) and importing
+# modelopt.torch.quantization.calib.quantile will fail.
+
+# Two files because 1,200 of the creative-writing samples (books and
+# screenplays) run at 8192 while the rest run at 4096. Sample counts and the
+# 60/20/10/10 split are unchanged; only the token budget shifts.
+[[dataset]]
+path = "text/behemoth_r1_123b_calib_4096.jsonl"
+max_len = 4096
+
+[[dataset]]
+path = "text/behemoth_r1_123b_calib_8192.jsonl"
+max_len = 8192

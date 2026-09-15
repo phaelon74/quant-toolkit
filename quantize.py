@@ -51,8 +51,18 @@ parser.add_argument("--resume-amax", type=str, default=None,
                     help="Load amax checkpoint and resume calibration from where it left off.")
 parser.add_argument("--resume-batch", type=int, default=0,
                     help="Skip batches before this number (1-indexed). Use with --resume-amax.")
-parser.add_argument("--calib-method", default="max", choices=["max", "quantile"],
-                    help="Calibration algorithm. 'quantile' uses P2 streaming quantile estimation.")
+parser.add_argument("--calib-method", default="max",
+                    choices=["max", "mse", "local_hessian", "nvfp4_act_headroom",
+                             "quantile"],
+                    help="Calibration algorithm. 'max' works everywhere. 'mse' and "
+                         "'local_hessian' refine NVFP4 weight scales via an FP8 "
+                         "block-scale sweep. 'nvfp4_act_headroom' adds clipping "
+                         "headroom to activation global scales (newer ModelOpt only). "
+                         "'quantile' needs a build shipping calib.quantile, which "
+                         "upstream does not.")
+parser.add_argument("--weight-scale-method", default="max",
+                    choices=["max", "mse", "local_hessian"],
+                    help="Weight scale algorithm for --calib-method nvfp4_act_headroom.")
 parser.add_argument("--save-quantiles", type=str, default=None,
                     help="Save quantile estimates to this JSON file (quantile calibration only).")
 args = parser.parse_args()
@@ -89,6 +99,11 @@ def load_calib_datasets(args):
             args.calib_method = calib_sec["method"]
         if "quantiles" in calib_sec:
             args.quantiles = calib_sec["quantiles"]
+        if "weight_scale_method" in calib_sec:
+            args.weight_scale_method = calib_sec["weight_scale_method"]
+        for key in ("anchor_percentile", "upper_percentile", "rho"):
+            if key in calib_sec:
+                setattr(args, key, calib_sec[key])
 
         return datasets
 
@@ -422,13 +437,57 @@ def forward_loop(m):
 # Quantize.
 # ---------------------------------------------------------------------------
 
-qcfg = copy.deepcopy(mtq.NVFP4_DEFAULT_CFG)
-for pattern, override in cfg.get_all_quant_overrides().items():
-    qcfg["quant_cfg"][pattern] = override
+def apply_quant_overrides(qcfg, overrides):
+    """Apply ``{pattern: attrs}`` overrides to either quant_cfg layout.
+
+    ModelOpt 0.44 changed quant_cfg from a pattern-keyed dict into an ordered
+    list of QuantizerCfgEntry where later entries win, so appending reproduces
+    the precedence the old dict assignment had.
+    """
+    quant_cfg = qcfg["quant_cfg"]
+    if not isinstance(quant_cfg, list):
+        for pattern, attrs in overrides.items():
+            quant_cfg[pattern] = attrs
+        return
+
+    for pattern, attrs in overrides.items():
+        attrs = dict(attrs)
+        entry = {"quantizer_name": pattern}
+        if "enable" in attrs:
+            entry["enable"] = attrs.pop("enable")
+        if attrs:
+            entry["cfg"] = attrs
+        quant_cfg.append(entry)
+
+
+qcfg = copy.deepcopy(cfg.get_base_quant_cfg())
+apply_quant_overrides(qcfg, cfg.get_all_quant_overrides())
 
 if args.calib_method == "quantile":
     qcfg["algorithm"] = "quantile"
-    qcfg["quant_cfg"]["*input_quantizer"]["calibrator"] = "quantile"
+    if isinstance(qcfg["quant_cfg"], list):
+        apply_quant_overrides(qcfg, {"*input_quantizer": {"calibrator": "quantile"}})
+    else:
+        # Mutate in place so num_bits / block_sizes survive.
+        qcfg["quant_cfg"]["*input_quantizer"]["calibrator"] = "quantile"
+elif args.calib_method in ("mse", "local_hessian"):
+    # Both max-calibrate first, then refine NVFP4 weight scales by sweeping the
+    # 126 candidate FP8-E4M3 block scales. Activation scales stay max-based.
+    qcfg["algorithm"] = {"method": args.calib_method, "fp8_scale_sweep": True}
+elif args.calib_method == "nvfp4_act_headroom":
+    # Anchors the NVFP4 activation global scale low in the FP8 block-scale range
+    # and clips above upper_percentile, so one outlier block can't push every
+    # other block's scale subnormal.
+    algo = {"method": "nvfp4_act_headroom"}
+    for key in ("anchor_percentile", "upper_percentile", "rho"):
+        if hasattr(args, key):
+            algo[key] = getattr(args, key)
+    if args.weight_scale_method != "max":
+        algo["weight_scale_algorithm"] = {
+            "method": args.weight_scale_method,
+            "fp8_scale_sweep": True,
+        }
+    qcfg["algorithm"] = algo
 
 print(f"\nQuantizing with NVFP4 (model={args.model}, calib={args.calib_method})...")
 model = mtq.quantize(model, qcfg, forward_loop)

@@ -1,0 +1,373 @@
+calibration_set:
+
+  # =====================================================
+  # BEHEMOTH-R1-123B-v2 — NVFP4 CALIBRATION
+  # Dense Mistral-Large-2411 creative-writing / RP finetune
+  # with an optional <think> reasoning phase.
+  # =====================================================
+  #
+  # Design Philosophy:
+  # - The model's job is prose and character work, so the
+  #   activation statistics that matter come from narrative
+  #   and dialogue, not from agentic coding traces.
+  # - Reasoning slice carries real chain-of-thought text so
+  #   the <think> prefill path is in-distribution. Build with
+  #   --think-tag think to rewrite upstream CoT markers.
+  # - ~1% code is retained on purpose: enough to keep 2411's
+  #   latent coding range represented, not enough to bias
+  #   the scales toward it.
+  # - Every source here is drawn from the validated specs in
+  #   data/examples/ (same columns, same formatters).
+  # =====================================================
+
+  max_seq_length: 4096
+  shuffle: true
+  seed: 42
+
+  # =====================================================
+  # Category Summary (Total: 16,000 samples)
+  # =====================================================
+  # CREATIVE WRITING        (9,600 samples - 60%)  [PRIMARY]
+  # ROLEPLAY                (3,200 samples - 20%)
+  # GENERAL REASONING       (1,600 samples - 10%)
+  # GENERAL BREADTH         (1,600 samples - 10%)
+  # =====================================================
+
+  datasets:
+
+    # ================================================
+    # CREATIVE WRITING — 9,600 samples (60%)
+    # Narrative fiction, genre prose, long-form books,
+    # screenplay, poetry, and creative nonfiction.
+    # ================================================
+
+    # --- Narrative fiction core (5,300) ---
+
+    # Premium Claude-quality writing prompts
+    - dataset: Gryphe/Opus-WritingPrompts
+      split: train
+      columns: [conversations]
+      formatter: sharegpt
+      num_samples: 1600
+
+    # Community writing prompts — widest stylistic range
+    - dataset: euclaise/writingprompts
+      split: train
+      columns: [prompt, story]
+      formatter: prompt_answer
+      num_samples: 1400
+
+    # GPT-4o writing prompts — genre coverage
+    - dataset: Gryphe/ChatGPT-4o-Writing-Prompts
+      split: train
+      columns: [prompt, story]
+      formatter: prompt_answer
+      num_samples: 1300
+
+    # Classic fiction — literary grounding
+    - dataset: sam-paech/gutenberg3-generalfiction-scifi-fantasy-romance-adventure-dpo
+      split: train
+      columns: [chosen]
+      formatter: chat_completion
+      num_samples: 1000
+
+    # --- Description, world-building, atmosphere (1,600) ---
+
+    # Claude writing — rich descriptive prose
+    - dataset: anthracite-org/nopm_claude_writing_fixed
+      split: train
+      columns: [conversations]
+      formatter: sharegpt
+      num_samples: 900
+
+    # Augmented prompts — genre variety
+    - dataset: fabraz/writingPromptAug
+      split: train
+      columns: [prompt, story]
+      formatter: prompt_answer
+      num_samples: 800
+
+    # Adventure scenarios and settings
+    - dataset: PocketDoc/Dans-Prosemaxx-Adventure
+      split: train
+      columns: [conversations]
+      formatter: sharegpt
+      num_samples: 700
+
+    # --- Long-form prose at 8192 (1,200) ---
+    # Book- and script-length text, the only slice run at double
+    # length. These calibrate the activation ranges that show up in
+    # long RP sessions and extended scenes. Emitted to a separate
+    # JSONL so quantize.py can give them their own max_len.
+
+    - dataset: lucadiliello/bookcorpusopen
+      split: train
+      columns: [text]
+      formatter: raw_text
+      num_samples: 500
+      streaming: true
+      max_seq_length: 8192
+
+    - dataset: storytracer/US-PD-Books
+      split: train
+      columns: [text, title]
+      formatter: raw_text
+      num_samples: 400
+      streaming: true
+      max_seq_length: 8192
+
+    # Screenplay formatting and scene structure
+    - dataset: IsmaelMousa/movies
+      split: train
+      columns: [Script, Name]
+      formatter: raw_text
+      num_samples: 300
+      max_seq_length: 8192
+
+    # --- Prose rhythm and creative nonfiction (700) ---
+
+    - dataset: merve/poetry
+      split: train
+      columns: [content]
+      formatter: raw_text
+      num_samples: 250
+
+    - dataset: Abirate/english_quotes
+      split: train
+      columns: [quote]
+      formatter: raw_text
+      num_samples: 150
+
+    - dataset: fabiochiu/medium-articles
+      split: train
+      columns: [content, title]
+      formatter: raw_text
+      num_samples: 150
+      streaming: true
+
+    - dataset: sgoel9/paul_graham_essays
+      split: train
+      columns: [text, title]
+      formatter: raw_text
+      num_samples: 150
+
+
+    # ================================================
+    # ROLEPLAY — 3,200 samples (20%)
+    # Character cards, persona voice, multi-turn scenes.
+    # ================================================
+
+    # Premium character-card roleplay
+    - dataset: Gryphe/Sonnet3.5-Charcard-Roleplay
+      split: train
+      columns: [conversation]
+      formatter: sharegpt
+      num_samples: 800
+
+    # High-quality filtered RP interactions
+    - dataset: anthracite-org/stheno-filtered-v1.1
+      split: train
+      columns: [conversations]
+      formatter: sharegpt
+      num_samples: 700
+
+    # Claude Opus quality RP, no refusals
+    - dataset: anthracite-org/kalo-opus-instruct-22k-no-refusal
+      split: train
+      columns: [conversations]
+      formatter: sharegpt
+      num_samples: 600
+
+    # Community RP — messier, more realistic user turns
+    - dataset: PygmalionAI/PIPPA
+      split: train
+      columns: [bot_name, conversation]
+      formatter: sharegpt
+      num_samples: 450
+
+    # Persona-conditioned dialogue
+    - dataset: awsaf49/persona-chat
+      split: train
+      columns: [persona, conversation]
+      formatter: chat_completion
+      num_samples: 300
+
+    # Interactive / choice-driven adventure
+    - dataset: PocketDoc/Dans-Kinomaxx-VanillaBackrooms
+      split: train
+      columns: [conversations]
+      formatter: sharegpt
+      num_samples: 200
+
+    - dataset: zerofata/Roleplay-Anime-Characters
+      split: train
+      columns: [messages]
+      formatter: chat_completion
+      num_samples: 150
+
+
+    # ================================================
+    # GENERAL REASONING — 1,600 samples (10%)
+    # Explicit chain-of-thought so the <think> phase is
+    # calibrated, not just the prose that follows it.
+    # Build with --think-tag think.
+    # ================================================
+
+    # QwQ-style long reasoning traces (primary think-path source)
+    - dataset: open-thoughts/OpenThoughts-114k
+      split: train
+      columns: [conversations]
+      formatter: sharegpt
+      num_samples: 500
+
+    # DeepSeek-R1 math reasoning traces (long CoT)
+    - dataset: nvidia/OpenMathReasoning
+      split: cot
+      columns: [problem, generated_solution]
+      formatter: prompt_answer
+      num_samples: 250
+      streaming: true
+
+    # Competition math with step-by-step solutions
+    - dataset: AI-MO/NuminaMath-CoT
+      split: train
+      columns: [problem, solution]
+      formatter: prompt_answer
+      num_samples: 200
+
+    # Multi-domain science reasoning
+    - dataset: nvidia/OpenScienceReasoning-2
+      split: train
+      columns: [input, output]
+      formatter: prompt_answer
+      num_samples: 180
+      streaming: true
+
+    # Theory of mind — the reasoning pattern closest to RP
+    - dataset: PJMixers/grimulkan_theory-of-mind-ShareGPT
+      split: train
+      columns: [conversations]
+      formatter: sharegpt
+      num_samples: 150
+
+    # Physical-world reasoning — grounds scene consistency
+    - dataset: PJMixers/grimulkan_physical-reasoning-ShareGPT
+      split: train
+      columns: [conversations]
+      formatter: sharegpt
+      num_samples: 120
+
+    # STEM instruction breadth
+    - dataset: garage-bAInd/Open-Platypus
+      split: train
+      columns: [instruction, output]
+      formatter: prompt_answer
+      num_samples: 100
+
+    # Minimal code retention (~0.6% of the whole set).
+    # Set to 0 if you want a strictly zero-code calibration.
+    - dataset: nvidia/OpenCodeInstruct
+      split: train
+      columns: [input, output]
+      formatter: prompt_answer
+      num_samples: 100
+      streaming: true
+
+
+    # ================================================
+    # GENERAL BREADTH — 1,600 samples (10%)
+    # Non-creative domains, to stop capability collapse
+    # outside the finetune's home turf.
+    # ================================================
+
+    # General instruct / conversation baseline
+    - dataset: HuggingFaceH4/ultrachat_200k
+      split: train_sft
+      columns: [messages]
+      formatter: chat_completion
+      num_samples: 300
+
+    - dataset: databricks/databricks-dolly-15k
+      split: train
+      columns: [instruction, response]
+      formatter: prompt_answer
+      num_samples: 200
+
+    # Human-written, high-quality instructions
+    - dataset: HuggingFaceH4/no_robots
+      split: train
+      columns: [messages]
+      formatter: chat_completion
+      num_samples: 150
+
+    # Neural Magic's general calibration mix
+    - dataset: neuralmagic/calibration
+      subset: LLM
+      split: train
+      columns: [messages]
+      formatter: chat_completion
+      num_samples: 150
+
+    # Philosophy — dense abstract argumentation
+    - dataset: ruggsea/stanford-encyclopedia-of-philosophy_instruct
+      split: train
+      columns: [question, answer]
+      formatter: prompt_answer
+      num_samples: 130
+
+    # Socratic dialogue — dialectical structure
+    - dataset: FreedomIntelligence/SocraticChat
+      split: train
+      columns: [conversations]
+      formatter: sharegpt
+      num_samples: 120
+
+    # Helpful-response baseline
+    - dataset: nvidia/HelpSteer
+      split: train
+      columns: [prompt, response]
+      formatter: prompt_answer
+      num_samples: 110
+
+    # Medical reasoning
+    - dataset: OpenMed/Medical-Reasoning-SFT-GPT-OSS-120B
+      split: train
+      columns: [messages]
+      formatter: chat_completion
+      num_samples: 100
+      streaming: true
+
+    # Legal reasoning and structured argument
+    - dataset: Alignment-Lab-AI/Lawyer-Instruct
+      split: train
+      columns: [instruction, output]
+      formatter: prompt_answer
+      num_samples: 90
+
+    # Finance and business
+    - dataset: gbharti/finance-alpaca
+      split: train
+      columns: [instruction, output]
+      formatter: prompt_answer
+      num_samples: 80
+
+    # Cross-language breadth
+    - dataset: HuggingFaceH4/Multilingual-Thinking
+      split: train
+      columns: [user]
+      formatter: raw_text
+      num_samples: 70
+
+    # Pop culture and trope vocabulary — useful for RP grounding
+    - dataset: KaraKaraWitch/TvTroper-2025
+      split: train
+      columns: [article]
+      formatter: raw_text
+      num_samples: 60
+
+    # Practical/procedural knowledge
+    - dataset: AquaV/US-Army-Survival-Sharegpt
+      split: train
+      columns: [conversations]
+      formatter: sharegpt
+      num_samples: 40
