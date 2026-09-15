@@ -178,6 +178,10 @@ uv pip install -e .
 
 The `pytorch-cu130` index in `pyproject.toml` is marked `explicit = true`, which confines it to packages that name it. This is load-bearing — see §12 if you hit a `setuptools` resolution error.
 
+**What `-e .` actually installs.** Only the `models` package, declared via `[tool.setuptools] packages = ["models"]`. This repo is an application, not a library: `quantize.py`, `export_hf.py`, `streaming_loader.py` and the rest are top-level scripts you run from the repo root, resolved through the working directory rather than installed. The editable `models` package is still worth having, because `tools/check_modelopt.py` does `from models import AVAILABLE_MODELS` and, when run as `python tools/check_modelopt.py`, gets `tools/` on `sys.path` rather than the repo root.
+
+The first command also pulls `setuptools==78.1.0` from the PyTorch mirror, because `--index-url` replaces PyPI for that one invocation. The second command upgrades it to the `>=80` that ModelOpt requires. Confirm with `uv pip show setuptools` if a later step complains.
+
 The second command pulls `nvidia-modelopt[torch]==0.46.0`, `transformers==5.5.3`, `accelerate`, `safetensors`, `sentencepiece`, `protobuf`, `pillow`, and `requests`.
 
 ### With pip
@@ -424,6 +428,7 @@ Serving command and flags: [Behemoth-123B_v2_R1.md §7](Behemoth-123B_v2_R1.md).
 | ---------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
 | `only setuptools<=78.1.0 is available and nvidia-modelopt==0.46.0 depends on setuptools>=80` | The `pytorch-cu130` index is missing `explicit = true`. uv found `setuptools` mirrored on `download.pytorch.org` and, to block dependency-confusion attacks, refuses to consider PyPI for it. **Fix:** add `explicit = true` to the `[[tool.uv.index]]` block; the current `pyproject.toml` has it. Do *not* use `--index-strategy unsafe-best-match` — that weakens the protection for every package to work around one misscoped index. |
 | Any other `No solution found` naming a package PyTorch mirrors (`jinja2`, `networkx`, `requests`, …) | Same root cause and same fix as above. |
+| `Multiple top-level packages discovered in a flat-layout: ['data', 'models', 'configs']` | `pyproject.toml` was missing both a `[build-system]` table and an explicit package list, so setuptools fell back to `build_meta:__legacy__` and tried to auto-discover packages. It found three candidate directories and refused to guess. **Fix:** the current `pyproject.toml` declares `[build-system]` with `setuptools>=80` and `[tool.setuptools] packages = ["models"]`. |
 | `No module named 'modelopt'`                                     | venv not activated, or `pip install -e .` failed. Re-run and read the resolver output.                                  |
 | `torch.cuda.is_available()` is `False`, `version.cuda` is `None` | CPU-only wheel. Install Torch from the cu130 index **before** `pip install -e .` (§5).                                  |
 | Resolver conflict on `transformers`                              | ModelOpt 0.46's floor is 4.57 and the repo pins `==5.5.3`. Do not loosen both at once; change one and re-run the probe. |

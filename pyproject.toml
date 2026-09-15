@@ -1,3 +1,7 @@
+[build-system]
+requires = ["setuptools>=80"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "quantization"
 version = "0.1.0"
@@ -17,6 +21,14 @@ dependencies = [
     "torchvision",
     "transformers==5.5.3",
 ]
+
+# This is an application run from the repo root, not a library. `models` is the
+# only importable package; quantize.py, export_hf.py and friends are top-level
+# scripts resolved through the working directory. Declare the package explicitly
+# or setuptools' flat-layout auto-discovery sees data/, configs/ and models/,
+# refuses to guess between them, and fails the build.
+[tool.setuptools]
+packages = ["models"]
 
 # explicit = true is required, not cosmetic. Without it uv treats this index as
 # authoritative for every package it happens to mirror -- including setuptools,
