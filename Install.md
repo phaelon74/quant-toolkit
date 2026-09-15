@@ -362,7 +362,28 @@ export HF_HUB_CACHE=/media/fmodels2/hf/hub
 mkdir -p "$HF_HUB_CACHE"
 ```
 
-Put these in `~/.bashrc` so downloads and quantization agree on one location. If your model is already on disk (the Behemoth recipe passes `--model-id /media/fmodels/...`), the cache is barely used.
+Put these in `~/.bashrc` so downloads and quantization agree on one location.
+
+### The calibration build needs this even if your model is local
+
+Passing `--model-id /media/fmodels/...` skips the model download, but `tools/build_calib_from_yaml.py` still hits the cache hard, because **`load_dataset` without `streaming: true` downloads the entire dataset regardless of `num_samples`.** Asking for 1,600 rows out of a 300k-row corpus fetches all 300k, converts it to Arrow, and keeps both copies.
+
+For the Behemoth spec that is on the order of **tens of GB** of cache to produce a few hundred MB of JSONL. Set `HF_HOME` to a big mount *before* running the builder, or expect `~/.cache/huggingface` to grow on whatever partition `$HOME` lives on.
+
+| Path | Holds |
+| --- | --- |
+| `$HF_HOME/hub` | raw downloaded dataset files |
+| `$HF_HOME/datasets` | Arrow conversions and `.shuffle()` index caches |
+
+Inspect and reclaim:
+
+```bash
+du -sh "${HF_HOME:-$HOME/.cache/huggingface}"
+df -h "${HF_HOME:-$HOME/.cache/huggingface}"
+hf cache scan                    # or: huggingface-cli scan-cache
+```
+
+The cache is disposable once the JSONL exists — the quantization run reads only `data/text/*.jsonl`. To cut the download instead of the cleanup, add `streaming: true` to the heavy entries in the YAML; the builder honours it per source and samples from a shuffle buffer rather than the full corpus.
 
 Behemoth is **not** gated. Some models (Mistral base, certain Gemma/Qwen) need `huggingface-cli login`.
 

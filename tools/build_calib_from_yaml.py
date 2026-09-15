@@ -30,8 +30,10 @@ ap.add_argument("--output", required=True, help="Output JSONL path.")
 ap.add_argument("--think-tag", default=None,
                 help="Normalize reasoning-trace markers to this tag (e.g. 'think'). "
                      "Off by default.")
-ap.add_argument("--max-chars", type=int, default=120000,
-                help="Drop samples whose total content exceeds this.")
+ap.add_argument("--chars-per-token", type=int, default=8,
+                help="Character budget per token of max_seq_length. Samples over "
+                     "budget are truncated, not dropped. 8 is deliberately "
+                     "generous so a truncated sample still fills max_len.")
 ap.add_argument("--min-chars", type=int, default=48,
                 help="Drop samples whose total content is under this.")
 ap.add_argument("--seed", type=int, default=None,
@@ -116,6 +118,19 @@ def coerce_messages(raw) -> list | None:
     return out or None
 
 
+def truncate_messages(msgs: list, budget: int) -> list:
+    """Trim message contents to a total character budget, keeping the head."""
+    out, used = [], 0
+    for m in msgs:
+        if used >= budget:
+            break
+        content = m["content"][: budget - used]
+        if content:
+            out.append({"role": m["role"], "content": content})
+            used += len(content)
+    return out
+
+
 def _column_values(example, columns):
     return [example.get(c) for c in columns] if columns else []
 
@@ -191,6 +206,7 @@ FORMATTERS = {
 def collect(entry, seed, default_len):
     name = entry["dataset"]
     group_len = int(entry.get("max_seq_length", default_len))
+    bucket = entry.get("bucket", "unlabelled")
     split = entry.get("split", "train")
     subset = entry.get("subset")
     columns = entry.get("columns") or []
@@ -225,11 +241,12 @@ def collect(entry, seed, default_len):
             continue
         if not msgs or not any(m["role"] == "user" for m in msgs):
             continue
-        picked.append({"messages": msgs, "_len": group_len})
+        picked.append({"messages": msgs, "_len": group_len, "_bucket": bucket})
         if len(picked) >= want:
             break
 
-    print(f"  {label}: {len(picked)}/{want} @ {group_len}")
+    short = "" if len(picked) >= want else "   << SHORT"
+    print(f"  {label}: {len(picked)}/{want} @ {group_len}{short}")
     return picked
 
 
@@ -254,24 +271,41 @@ def main():
     if spec.get("shuffle", True):
         random.shuffle(samples)
 
-    groups, dropped_long, dropped_short = {}, 0, 0
+    groups, buckets, truncated, dropped_short = {}, {}, 0, 0
     for sample in samples:
         msgs = sample["messages"]
         if args.think_tag:
             for m in msgs:
                 if m["role"] == "assistant":
                     m["content"] = normalize_think(m["content"], args.think_tag)
+
         total = sum(len(m["content"]) for m in msgs)
-        if total > args.max_chars:
-            dropped_long += 1
-            continue
         if total < args.min_chars:
             dropped_short += 1
             continue
-        groups.setdefault(sample["_len"], []).append({"messages": msgs})
 
-    print(f"\nCollected {len(samples)}/{planned}; dropped "
-          f"{dropped_long} too long, {dropped_short} too short.")
+        # Over budget is truncated, never dropped. The tokenizer cuts at max_len
+        # anyway, and dropping would discard precisely the book- and
+        # script-length samples the long-form sources exist to provide.
+        budget = sample["_len"] * args.chars_per_token
+        if total > budget:
+            msgs = truncate_messages(msgs, budget)
+            truncated += 1
+            if not any(m["role"] == "user" and m["content"] for m in msgs):
+                dropped_short += 1
+                continue
+
+        groups.setdefault(sample["_len"], []).append({"messages": msgs})
+        buckets[sample["_bucket"]] = buckets.get(sample["_bucket"], 0) + 1
+
+    kept = sum(len(v) for v in groups.values())
+    print(f"\nCollected {len(samples)}/{planned}; kept {kept} "
+          f"({truncated} truncated to budget, {dropped_short} dropped as too short).")
+
+    if buckets:
+        print("\nBucket mix:")
+        for name, count in sorted(buckets.items(), key=lambda kv: -kv[1]):
+            print(f"  {name:<20} {count:>6}  {100 * count / kept:5.1f}%")
 
     # One file per max_seq_length: quantize.py sets max_len per [[dataset]].
     stem = re.sub(r"\.jsonl$", "", args.output)

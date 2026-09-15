@@ -12,12 +12,16 @@ calibration_set:
   #   and dialogue, not from agentic coding traces.
   # - Reasoning slice carries real chain-of-thought text so
   #   the <think> prefill path is in-distribution. Build with
-  #   --think-tag think to rewrite upstream CoT markers.
+  #   --think-tag think.
   # - ~1% code is retained on purpose: enough to keep 2411's
   #   latent coding range represented, not enough to bias
   #   the scales toward it.
   # - Every source here is drawn from the validated specs in
   #   data/examples/ (same columns, same formatters).
+  #
+  # `bucket` labels are only used for the mix report the
+  # builder prints at the end. `max_seq_length` overrides the
+  # global value per source and selects the output file.
   # =====================================================
 
   max_seq_length: 4096
@@ -45,6 +49,7 @@ calibration_set:
 
     # Premium Claude-quality writing prompts
     - dataset: Gryphe/Opus-WritingPrompts
+      bucket: creative_writing
       split: train
       columns: [conversations]
       formatter: sharegpt
@@ -52,6 +57,7 @@ calibration_set:
 
     # Community writing prompts — widest stylistic range
     - dataset: euclaise/writingprompts
+      bucket: creative_writing
       split: train
       columns: [prompt, story]
       formatter: prompt_answer
@@ -59,6 +65,7 @@ calibration_set:
 
     # GPT-4o writing prompts — genre coverage
     - dataset: Gryphe/ChatGPT-4o-Writing-Prompts
+      bucket: creative_writing
       split: train
       columns: [prompt, story]
       formatter: prompt_answer
@@ -66,6 +73,7 @@ calibration_set:
 
     # Classic fiction — literary grounding
     - dataset: sam-paech/gutenberg3-generalfiction-scifi-fantasy-romance-adventure-dpo
+      bucket: creative_writing
       split: train
       columns: [chosen]
       formatter: chat_completion
@@ -75,6 +83,7 @@ calibration_set:
 
     # Claude writing — rich descriptive prose
     - dataset: anthracite-org/nopm_claude_writing_fixed
+      bucket: creative_writing
       split: train
       columns: [conversations]
       formatter: sharegpt
@@ -82,6 +91,7 @@ calibration_set:
 
     # Augmented prompts — genre variety
     - dataset: fabraz/writingPromptAug
+      bucket: creative_writing
       split: train
       columns: [prompt, story]
       formatter: prompt_answer
@@ -89,18 +99,23 @@ calibration_set:
 
     # Adventure scenarios and settings
     - dataset: PocketDoc/Dans-Prosemaxx-Adventure
+      bucket: creative_writing
       split: train
       columns: [conversations]
       formatter: sharegpt
       num_samples: 700
 
     # --- Long-form prose at 8192 (1,200) ---
-    # Book- and script-length text, the only slice run at double
-    # length. These calibrate the activation ranges that show up in
-    # long RP sessions and extended scenes. Emitted to a separate
-    # JSONL so quantize.py can give them their own max_len.
+    # Book- and script-length text, the only slice run at
+    # double length. These calibrate the activation ranges
+    # that show up in long RP sessions and extended scenes.
+    # Emitted to a separate JSONL so quantize.py can give
+    # them their own max_len. Individually these documents
+    # far exceed 8192 tokens and are truncated to the
+    # character budget, not discarded.
 
     - dataset: lucadiliello/bookcorpusopen
+      bucket: creative_writing
       split: train
       columns: [text]
       formatter: raw_text
@@ -109,6 +124,7 @@ calibration_set:
       max_seq_length: 8192
 
     - dataset: storytracer/US-PD-Books
+      bucket: creative_writing
       split: train
       columns: [text, title]
       formatter: raw_text
@@ -118,6 +134,7 @@ calibration_set:
 
     # Screenplay formatting and scene structure
     - dataset: IsmaelMousa/movies
+      bucket: creative_writing
       split: train
       columns: [Script, Name]
       formatter: raw_text
@@ -127,18 +144,21 @@ calibration_set:
     # --- Prose rhythm and creative nonfiction (700) ---
 
     - dataset: merve/poetry
+      bucket: creative_writing
       split: train
       columns: [content]
       formatter: raw_text
       num_samples: 250
 
     - dataset: Abirate/english_quotes
+      bucket: creative_writing
       split: train
       columns: [quote]
       formatter: raw_text
       num_samples: 150
 
     - dataset: fabiochiu/medium-articles
+      bucket: creative_writing
       split: train
       columns: [content, title]
       formatter: raw_text
@@ -146,6 +166,7 @@ calibration_set:
       streaming: true
 
     - dataset: sgoel9/paul_graham_essays
+      bucket: creative_writing
       split: train
       columns: [text, title]
       formatter: raw_text
@@ -155,55 +176,56 @@ calibration_set:
     # ================================================
     # ROLEPLAY — 3,200 samples (20%)
     # Character cards, persona voice, multi-turn scenes.
+    #
+    # Two sources from data/examples/ are gone:
+    #   PygmalionAI/PIPPA   — ships a PIPPA.py loading
+    #     script, and datasets v4 removed script support.
+    #     Loadable only via revision="refs/convert/parquet".
+    #   awsaf49/persona-chat — loads but yields 0 usable
+    #     rows through the chat_completion formatter.
+    # Their 750 samples are redistributed below rather than
+    # replaced with untested dataset IDs.
     # ================================================
 
     # Premium character-card roleplay
     - dataset: Gryphe/Sonnet3.5-Charcard-Roleplay
+      bucket: roleplay
       split: train
       columns: [conversation]
       formatter: sharegpt
-      num_samples: 800
+      num_samples: 1150
 
     # High-quality filtered RP interactions
     - dataset: anthracite-org/stheno-filtered-v1.1
+      bucket: roleplay
       split: train
       columns: [conversations]
       formatter: sharegpt
-      num_samples: 700
+      num_samples: 1000
 
     # Claude Opus quality RP, no refusals
     - dataset: anthracite-org/kalo-opus-instruct-22k-no-refusal
+      bucket: roleplay
       split: train
       columns: [conversations]
       formatter: sharegpt
-      num_samples: 600
-
-    # Community RP — messier, more realistic user turns
-    - dataset: PygmalionAI/PIPPA
-      split: train
-      columns: [bot_name, conversation]
-      formatter: sharegpt
-      num_samples: 450
-
-    # Persona-conditioned dialogue
-    - dataset: awsaf49/persona-chat
-      split: train
-      columns: [persona, conversation]
-      formatter: chat_completion
-      num_samples: 300
-
-    # Interactive / choice-driven adventure
-    - dataset: PocketDoc/Dans-Kinomaxx-VanillaBackrooms
-      split: train
-      columns: [conversations]
-      formatter: sharegpt
-      num_samples: 200
+      num_samples: 800
 
     - dataset: zerofata/Roleplay-Anime-Characters
+      bucket: roleplay
       split: train
       columns: [messages]
       formatter: chat_completion
-      num_samples: 150
+      num_samples: 175
+
+    # Interactive / choice-driven adventure. Small dataset:
+    # only ~73 rows survive formatting, so do not raise this.
+    - dataset: PocketDoc/Dans-Kinomaxx-VanillaBackrooms
+      bucket: roleplay
+      split: train
+      columns: [conversations]
+      formatter: sharegpt
+      num_samples: 75
 
 
     # ================================================
@@ -215,6 +237,7 @@ calibration_set:
 
     # QwQ-style long reasoning traces (primary think-path source)
     - dataset: open-thoughts/OpenThoughts-114k
+      bucket: reasoning
       split: train
       columns: [conversations]
       formatter: sharegpt
@@ -222,6 +245,7 @@ calibration_set:
 
     # DeepSeek-R1 math reasoning traces (long CoT)
     - dataset: nvidia/OpenMathReasoning
+      bucket: reasoning
       split: cot
       columns: [problem, generated_solution]
       formatter: prompt_answer
@@ -230,6 +254,7 @@ calibration_set:
 
     # Competition math with step-by-step solutions
     - dataset: AI-MO/NuminaMath-CoT
+      bucket: reasoning
       split: train
       columns: [problem, solution]
       formatter: prompt_answer
@@ -237,6 +262,7 @@ calibration_set:
 
     # Multi-domain science reasoning
     - dataset: nvidia/OpenScienceReasoning-2
+      bucket: reasoning
       split: train
       columns: [input, output]
       formatter: prompt_answer
@@ -245,6 +271,7 @@ calibration_set:
 
     # Theory of mind — the reasoning pattern closest to RP
     - dataset: PJMixers/grimulkan_theory-of-mind-ShareGPT
+      bucket: reasoning
       split: train
       columns: [conversations]
       formatter: sharegpt
@@ -252,6 +279,7 @@ calibration_set:
 
     # Physical-world reasoning — grounds scene consistency
     - dataset: PJMixers/grimulkan_physical-reasoning-ShareGPT
+      bucket: reasoning
       split: train
       columns: [conversations]
       formatter: sharegpt
@@ -259,14 +287,16 @@ calibration_set:
 
     # STEM instruction breadth
     - dataset: garage-bAInd/Open-Platypus
+      bucket: reasoning
       split: train
       columns: [instruction, output]
       formatter: prompt_answer
       num_samples: 100
 
     # Minimal code retention (~0.6% of the whole set).
-    # Set to 0 if you want a strictly zero-code calibration.
+    # Set to 0 for a strictly zero-code calibration.
     - dataset: nvidia/OpenCodeInstruct
+      bucket: reasoning
       split: train
       columns: [input, output]
       formatter: prompt_answer
@@ -280,14 +310,15 @@ calibration_set:
     # outside the finetune's home turf.
     # ================================================
 
-    # General instruct / conversation baseline
     - dataset: HuggingFaceH4/ultrachat_200k
+      bucket: breadth
       split: train_sft
       columns: [messages]
       formatter: chat_completion
       num_samples: 300
 
     - dataset: databricks/databricks-dolly-15k
+      bucket: breadth
       split: train
       columns: [instruction, response]
       formatter: prompt_answer
@@ -295,6 +326,7 @@ calibration_set:
 
     # Human-written, high-quality instructions
     - dataset: HuggingFaceH4/no_robots
+      bucket: breadth
       split: train
       columns: [messages]
       formatter: chat_completion
@@ -302,6 +334,7 @@ calibration_set:
 
     # Neural Magic's general calibration mix
     - dataset: neuralmagic/calibration
+      bucket: breadth
       subset: LLM
       split: train
       columns: [messages]
@@ -310,6 +343,7 @@ calibration_set:
 
     # Philosophy — dense abstract argumentation
     - dataset: ruggsea/stanford-encyclopedia-of-philosophy_instruct
+      bucket: breadth
       split: train
       columns: [question, answer]
       formatter: prompt_answer
@@ -317,6 +351,7 @@ calibration_set:
 
     # Socratic dialogue — dialectical structure
     - dataset: FreedomIntelligence/SocraticChat
+      bucket: breadth
       split: train
       columns: [conversations]
       formatter: sharegpt
@@ -324,6 +359,7 @@ calibration_set:
 
     # Helpful-response baseline
     - dataset: nvidia/HelpSteer
+      bucket: breadth
       split: train
       columns: [prompt, response]
       formatter: prompt_answer
@@ -331,6 +367,7 @@ calibration_set:
 
     # Medical reasoning
     - dataset: OpenMed/Medical-Reasoning-SFT-GPT-OSS-120B
+      bucket: breadth
       split: train
       columns: [messages]
       formatter: chat_completion
@@ -339,6 +376,7 @@ calibration_set:
 
     # Legal reasoning and structured argument
     - dataset: Alignment-Lab-AI/Lawyer-Instruct
+      bucket: breadth
       split: train
       columns: [instruction, output]
       formatter: prompt_answer
@@ -346,6 +384,7 @@ calibration_set:
 
     # Finance and business
     - dataset: gbharti/finance-alpaca
+      bucket: breadth
       split: train
       columns: [instruction, output]
       formatter: prompt_answer
@@ -353,6 +392,7 @@ calibration_set:
 
     # Cross-language breadth
     - dataset: HuggingFaceH4/Multilingual-Thinking
+      bucket: breadth
       split: train
       columns: [user]
       formatter: raw_text
@@ -360,6 +400,7 @@ calibration_set:
 
     # Pop culture and trope vocabulary — useful for RP grounding
     - dataset: KaraKaraWitch/TvTroper-2025
+      bucket: breadth
       split: train
       columns: [article]
       formatter: raw_text
@@ -367,6 +408,7 @@ calibration_set:
 
     # Practical/procedural knowledge
     - dataset: AquaV/US-Army-Survival-Sharegpt
+      bucket: breadth
       split: train
       columns: [conversations]
       formatter: sharegpt
