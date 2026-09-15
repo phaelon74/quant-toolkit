@@ -210,7 +210,10 @@ Not in `pyproject.toml`, but needed by specific tools:
 
 ```bash
 # Build calibration JSONL from Hugging Face datasets.
-# Required for the Behemoth recipe (tools/build_calib_from_yaml.py).
+# Required for the Behemoth recipe (tools/build_calib_from_yaml.py) and for
+# tools/check_calib_spec.py, which validates a spec against the Hub in a few
+# seconds instead of finding a bad column name an hour into a build:
+#   python tools/check_calib_spec.py --yaml data/behemoth_r1_123b_calib.yaml
 uv pip install datasets pyyaml
 
 # Faster Hugging Face downloads: nothing to install on huggingface_hub 1.x,
@@ -536,7 +539,8 @@ Serving command and flags: [Behemoth-123B_v2_R1.md §7](Behemoth-123B_v2_R1.md).
 | `huggingface_hub` 401 / 403                                 | Gated repo. Export `HF_TOKEN` or run `hf auth login`, then accept the terms on the repo page while signed in (§9).                                      |
 | `429 Too Many Requests` mid dataset build                   | Anonymous rate limit. Set `HF_TOKEN` and re-run; cached sources are skipped (§9).                                                                      |
 | Dataset build reports `!! skip <name>: ... 401`             | Same as above, but note the builder *continues* — that source contributes 0 samples. Check the mix report before quantizing.                            |
-| `Dataset scripts are no longer supported, but found *.py`   | `datasets` v4 dropped script-based loaders. Try `revision: refs/convert/parquet`, or drop the source and redistribute its `num_samples`.                |
+| `Dataset scripts are no longer supported, but found *.py`   | `datasets` v4 dropped script-based loaders. Usually unfixable: repos like this also return 501 from the datasets-server, meaning no `refs/convert/parquet` exists to fall back to. Drop the source and redistribute its `num_samples`. |
+| A source reports `0/N` but did not error                    | Wrong column names — the formatter got `None` and returned nothing. Run `tools/check_calib_spec.py` (§6).                                               |
 | `uv pip install "huggingface_hub[hf_transfer]"` → `Checked 1 package`, installs nothing | Correct behaviour. The extra was removed in `huggingface_hub` 1.x. Use Xet instead (§9).                                     |
 | `DeprecationWarning: HF_HUB_ENABLE_HF_TRANSFER ... deprecated` | Unset it and export `HF_XET_HIGH_PERFORMANCE=1` (§9).                                                                                                |
 | OOM during calibration                                      | Lower `--batch-tokens` (try 16384). Only add `--streaming` if the model genuinely does not fit; raise `--cpu-capacity` only if you truly have the RAM. |

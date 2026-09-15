@@ -53,7 +53,7 @@ calibration_set:
       split: train
       columns: [conversations]
       formatter: sharegpt
-      num_samples: 1600
+      num_samples: 1720
 
     # Community writing prompts — widest stylistic range
     - dataset: euclaise/writingprompts
@@ -63,12 +63,13 @@ calibration_set:
       formatter: prompt_answer
       num_samples: 1400
 
-    # GPT-4o writing prompts — genre coverage
+    # GPT-4o writing prompts — genre coverage.
+    # ShareGPT `conversations`, not prompt/story columns.
     - dataset: Gryphe/ChatGPT-4o-Writing-Prompts
       bucket: creative_writing
       split: train
-      columns: [prompt, story]
-      formatter: prompt_answer
+      columns: [conversations]
+      formatter: sharegpt
       num_samples: 1300
 
     # Classic fiction — literary grounding
@@ -89,21 +90,23 @@ calibration_set:
       formatter: sharegpt
       num_samples: 900
 
-    # Augmented prompts — genre variety
+    # Augmented prompts — genre variety. One flat `text` column holding a
+    # "User: ... -> Rosey: ..." transcript, so raw_text, not prompt_answer.
+    # Do not list splitLineIndex: raw_text takes the longest listed column.
     - dataset: fabraz/writingPromptAug
       bucket: creative_writing
       split: train
-      columns: [prompt, story]
-      formatter: prompt_answer
+      columns: [text]
+      formatter: raw_text
       num_samples: 800
 
-    # Adventure scenarios and settings
+    # Adventure scenarios and settings. Only 586 rows exist; do not raise.
     - dataset: PocketDoc/Dans-Prosemaxx-Adventure
       bucket: creative_writing
       split: train
       columns: [conversations]
       formatter: sharegpt
-      num_samples: 700
+      num_samples: 580
 
     # --- Long-form prose at 8192 (1,200) ---
     # Book- and script-length text, the only slice run at
@@ -114,21 +117,18 @@ calibration_set:
     # far exceed 8192 tokens and are truncated to the
     # character budget, not discarded.
 
+    # Full book text, one novel per row. Carries the 400 samples that
+    # storytracer/US-PD-Books was supposed to provide: that dataset is
+    # metadata only (ocaid, title, author, year, full_text_url) with no text
+    # column, so it yielded 400 book *titles* of ~26 chars, every one of them
+    # then dropped for being under --min-chars. Removed rather than fixed;
+    # using it means fetching each book from archive.org separately.
     - dataset: lucadiliello/bookcorpusopen
       bucket: creative_writing
       split: train
       columns: [text]
       formatter: raw_text
-      num_samples: 500
-      streaming: true
-      max_seq_length: 8192
-
-    - dataset: storytracer/US-PD-Books
-      bucket: creative_writing
-      split: train
-      columns: [text, title]
-      formatter: raw_text
-      num_samples: 400
+      num_samples: 900
       streaming: true
       max_seq_length: 8192
 
@@ -177,21 +177,24 @@ calibration_set:
     # ROLEPLAY — 3,200 samples (20%)
     # Character cards, persona voice, multi-turn scenes.
     #
-    # Two sources from data/examples/ are gone:
-    #   PygmalionAI/PIPPA   — ships a PIPPA.py loading
-    #     script, and datasets v4 removed script support.
-    #     Loadable only via revision="refs/convert/parquet".
-    #   awsaf49/persona-chat — loads but yields 0 usable
-    #     rows through the chat_completion formatter.
-    # Their 750 samples are redistributed below rather than
-    # replaced with untested dataset IDs.
+    # Two sources from data/examples/ are unusable:
+    #   PygmalionAI/PIPPA — ships a PIPPA.py loading script and datasets v4
+    #     removed script support. There is no parquet fallback either: the
+    #     datasets-server returns 501 for this repo, so refs/convert/parquet
+    #     was never generated. Only a manual download of the raw JSONL works.
+    #   awsaf49/persona-chat — real schema is a single `text` column of
+    #     781k *individual lines* in flat ConvAI2 format ("1 your persona:
+    #     i like to remodel homes."). Reassembling dialogues needs stateful
+    #     grouping across rows, and a single row is far under --min-chars.
+    # Their 750 samples are redistributed below rather than replaced with
+    # untested dataset IDs.
     # ================================================
 
     # Premium character-card roleplay
     - dataset: Gryphe/Sonnet3.5-Charcard-Roleplay
       bucket: roleplay
       split: train
-      columns: [conversation]
+      columns: [conversations]
       formatter: sharegpt
       num_samples: 1150
 
@@ -216,16 +219,15 @@ calibration_set:
       split: train
       columns: [messages]
       formatter: chat_completion
-      num_samples: 175
+      num_samples: 177
 
-    # Interactive / choice-driven adventure. Small dataset:
-    # only ~73 rows survive formatting, so do not raise this.
+    # Interactive / choice-driven adventure. The whole train split is 73 rows.
     - dataset: PocketDoc/Dans-Kinomaxx-VanillaBackrooms
       bucket: roleplay
       split: train
       columns: [conversations]
       formatter: sharegpt
-      num_samples: 75
+      num_samples: 73
 
 
     # ================================================
