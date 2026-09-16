@@ -310,6 +310,14 @@ def cmd_compare(args):
     line("p99", f"{np.percentile(kld, 99):.6f}")
     line("max", f"{kld.max():.6f}")
 
+    # A max over hundreds of thousands of positions is a single token and says
+    # nothing about how often the model actually diverges. The thresholds do.
+    print("\n=== divergence tail ===")
+    for thresh in (0.05, 0.10, 0.25, 0.50, 1.00):
+        share = float((kld > thresh).mean())
+        line(f"positions > {thresh:.2f} nats",
+             f"{share * 100:6.3f}%", f"{int(share * n):>8} of {n}")
+
     print("\n=== agreement ===")
     line("top-1 match", f"{agree * 100:.2f}%")
     line("ref mass inside cand top-k", f"{covered.mean() * 100:.3f}%",
