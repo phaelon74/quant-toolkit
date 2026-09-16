@@ -52,18 +52,36 @@ def line(label, value, note=""):
 # collect
 
 
+def as_token_list(encoded):
+    """Normalize whatever apply_chat_template returned into a flat list of ints.
+
+    transformers 5 flipped apply_chat_template's return_dict default to True,
+    so it hands back a BatchEncoding rather than a list. len() on that is the
+    number of dict keys, which silently makes every document look 2 tokens long
+    and yields zero windows with no error anywhere.
+    """
+    if hasattr(encoded, "keys") or isinstance(encoded, dict):
+        encoded = encoded["input_ids"]
+    if encoded and isinstance(encoded[0], (list, tuple)):
+        encoded = encoded[0]
+    return list(encoded)
+
+
 def load_windows(texts_path, tokenizer_dir, seq_len, max_seqs):
     """Tokenize the corpus into fixed-length windows of exactly seq_len tokens.
 
     Fixed length keeps every position equally weighted in the averages and
     makes the two runs trivially comparable. Short documents are dropped rather
     than padded; padding would score meaningless positions.
+
+    Returns (windows, rejected count, per-document token lengths). The lengths
+    are only used to explain a zero-window result.
     """
     from transformers import AutoTokenizer
 
     tok = AutoTokenizer.from_pretrained(tokenizer_dir, trust_remote_code=False)
 
-    windows, rejected = [], [0]
+    windows, rejected, doc_lens = [], [0], []
     with open(texts_path, encoding="utf-8") as f:
         for raw in f:
             raw = raw.strip()
@@ -78,7 +96,8 @@ def load_windows(texts_path, tokenizer_dir, seq_len, max_seqs):
                 # sources do contain. Skip those rows instead of aborting a run
                 # that is otherwise fine.
                 try:
-                    ids = tok.apply_chat_template(row["messages"], tokenize=True)
+                    ids = as_token_list(
+                        tok.apply_chat_template(row["messages"], tokenize=True))
                 except Exception:
                     rejected[0] += 1
                     continue
@@ -86,11 +105,13 @@ def load_windows(texts_path, tokenizer_dir, seq_len, max_seqs):
                 ids = tok(row["text"], add_special_tokens=False)["input_ids"]
             else:
                 continue
+
+            doc_lens.append(len(ids))
             for start in range(0, len(ids) - seq_len + 1, seq_len):
                 windows.append(ids[start:start + seq_len])
                 if len(windows) >= max_seqs:
-                    return windows, rejected[0]
-    return windows, rejected[0]
+                    return windows, rejected[0], doc_lens
+    return windows, rejected[0], doc_lens
 
 
 def score_window(session, args, ids):
@@ -145,15 +166,24 @@ def cmd_collect(args):
     import requests
 
     print("\n=== corpus ===")
-    windows, rejected = load_windows(args.texts, args.tokenizer, args.seq_len,
-                                     args.max_seqs)
-    if not windows:
-        sys.exit(f"no window of {args.seq_len} tokens found in {args.texts}")
+    windows, rejected, doc_lens = load_windows(args.texts, args.tokenizer,
+                                               args.seq_len, args.max_seqs)
     line("texts", args.texts)
-    line("windows", f"{len(windows)} x {args.seq_len} tokens")
-    line("scored positions", len(windows) * (args.seq_len - 1))
+    line("documents tokenized", len(doc_lens))
+    if doc_lens:
+        line("doc tokens", f"min {min(doc_lens)}  median "
+                           f"{int(np.median(doc_lens))}  max {max(doc_lens)}")
     if rejected:
         line("rejected by chat template", rejected, "non-alternating roles")
+
+    if not windows:
+        sys.exit(f"\n  no document reaches {args.seq_len} tokens, so no window "
+                 f"could be cut.\n  Lower --seq-len, or check the numbers above: "
+                 f"a median of 1-3 tokens means the\n  tokenizer returned a dict "
+                 f"rather than a token list, not that the corpus is short.")
+
+    line("windows", f"{len(windows)} x {args.seq_len} tokens")
+    line("scored positions", len(windows) * (args.seq_len - 1))
 
     session = requests.Session()
 
