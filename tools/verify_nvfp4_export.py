@@ -10,8 +10,9 @@ Checks, in order of how expensive they are to discover later:
      kv_cache_quant_algo depending on layout; if either is set, the KV override
      did not take.
   2. group_size is 16. b12x hardcodes sf_vec_size=16.
-  3. Quantization scope: o_proj/gate_proj/up_proj/down_proj carry scales,
-     q_proj/k_proj/v_proj/lm_head/embed_tokens do not.
+  3. Quantization scope, per --scope. "omlp" expects scales on
+     o_proj/gate_proj/up_proj/down_proj only; "omlp-q" also expects them on
+     q_proj. Everything outside the chosen scope must still be plain BF16.
   4. Every unquantized linear is listed in ignore / exclude_modules. Because
      targets is ["Linear"], anything unlisted gets an NVFP4 linear method, looks
      for a weight_scale that does not exist, and fails at load, not at export.
@@ -38,15 +39,23 @@ import sys
 from fnmatch import fnmatch
 from pathlib import Path
 
-QUANTIZED = ("o_proj", "gate_proj", "up_proj", "down_proj")
-UNQUANTIZED = ("q_proj", "k_proj", "v_proj", "lm_head", "embed_tokens")
+SCOPES = {
+    "omlp": (("o_proj", "gate_proj", "up_proj", "down_proj"),
+             ("q_proj", "k_proj", "v_proj", "lm_head", "embed_tokens")),
+    "omlp-q": (("o_proj", "gate_proj", "up_proj", "down_proj", "q_proj"),
+               ("k_proj", "v_proj", "lm_head", "embed_tokens")),
+}
 
 ap = argparse.ArgumentParser(description=__doc__,
                              formatter_class=argparse.RawDescriptionHelpFormatter)
 ap.add_argument("export_dir", help="Directory containing config.json.")
+ap.add_argument("--scope", choices=sorted(SCOPES), default="omlp",
+                help="Expected quantization scope. omlp-q also expects q_proj in NVFP4.")
 ap.add_argument("--sample-layers", type=int, default=4,
                 help="How many layers to numerically inspect block scales in.")
 args = ap.parse_args()
+
+QUANTIZED, UNQUANTIZED = SCOPES[args.scope]
 
 root = Path(args.export_dir)
 FAIL, WARN = [], []
@@ -136,6 +145,7 @@ else:
 # ---------------------------------------------------------------------------
 # Group tensor names by owning module.
 print("\n=== Quantization scope ===")
+line("expected scope", args.scope, f"NVFP4: {', '.join(QUANTIZED)}")
 modules = {}
 for key in weight_map:
     m = re.match(r"(.*)\.(weight|weight_scale|weight_scale_2|input_scale|bias)$", key)

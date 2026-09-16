@@ -1,0 +1,184 @@
+calibration_set:
+
+  # =====================================================
+  # BEHEMOTH-R1-123B-v2 — HELD-OUT KLD EVAL SET
+  # =====================================================
+  #
+  # Companion to behemoth_r1_123b_calib.yaml, used by
+  # tools/kld_eval.py to score BF16 against each NVFP4
+  # variant. Not for calibration.
+  #
+  # Same buckets and same 60/20/10/10 proportions as the
+  # calibration set, so the KLD is measured on the mix the
+  # model is actually meant to serve. A representative
+  # subset of the sources rather than all 39: the point is
+  # a few hundred scored windows, not breadth of provenance.
+  #
+  # Different seed AND an explicit exclusion are both
+  # required. A new seed reshuffles but can still draw rows
+  # the calibration run already used, and scoring drift on
+  # data the scales were fitted to understates it. Build with:
+  #
+  #   python tools/build_calib_from_yaml.py \
+  #       --yaml data/behemoth_r1_123b_eval.yaml \
+  #       --output data/text/behemoth_r1_123b_eval.jsonl \
+  #       --think-tag think \
+  #       --exclude data/text/behemoth_r1_123b_calib_4096.jsonl \
+  #                 data/text/behemoth_r1_123b_calib_8192.jsonl
+  #
+  # One max_seq_length throughout, so this emits a single
+  # file. kld_eval.py re-windows it to --seq-len anyway; the
+  # only job here is to keep documents long enough to fill
+  # those windows.
+  # =====================================================
+
+  max_seq_length: 8192
+  shuffle: true
+  seed: 1337
+
+  # =====================================================
+  # Category Summary (Total: 500 samples)
+  # =====================================================
+  # CREATIVE WRITING          (300 samples - 60%)
+  # ROLEPLAY                  (100 samples - 20%)
+  # GENERAL REASONING          (50 samples - 10%)
+  # GENERAL BREADTH            (50 samples - 10%)
+  # =====================================================
+
+  datasets:
+
+    # ================================================
+    # CREATIVE WRITING — 300 samples (60%)
+    # ================================================
+
+    - dataset: Gryphe/Opus-WritingPrompts
+      bucket: creative_writing
+      split: train
+      columns: [conversations]
+      formatter: sharegpt
+      num_samples: 60
+
+    - dataset: euclaise/writingprompts
+      bucket: creative_writing
+      split: train
+      columns: [prompt, story]
+      formatter: prompt_answer
+      num_samples: 50
+
+    - dataset: Gryphe/ChatGPT-4o-Writing-Prompts
+      bucket: creative_writing
+      split: train
+      columns: [conversations]
+      formatter: sharegpt
+      num_samples: 50
+
+    - dataset: sam-paech/gutenberg3-generalfiction-scifi-fantasy-romance-adventure-dpo
+      bucket: creative_writing
+      split: train
+      columns: [chosen]
+      formatter: chat_completion
+      num_samples: 40
+
+    - dataset: anthracite-org/nopm_claude_writing_fixed
+      bucket: creative_writing
+      split: train
+      columns: [conversations]
+      formatter: sharegpt
+      num_samples: 40
+
+    # Long-form prose. The slice that stresses the activation ranges the
+    # 8192 calibration file existed to cover.
+    - dataset: lucadiliello/bookcorpusopen
+      bucket: creative_writing
+      split: train
+      columns: [text]
+      formatter: raw_text
+      num_samples: 40
+      streaming: true
+
+    - dataset: IsmaelMousa/movies
+      bucket: creative_writing
+      split: train
+      columns: [Script, Name]
+      formatter: raw_text
+      num_samples: 20
+
+
+    # ================================================
+    # ROLEPLAY — 100 samples (20%)
+    # ================================================
+
+    - dataset: Gryphe/Sonnet3.5-Charcard-Roleplay
+      bucket: roleplay
+      split: train
+      columns: [conversations]
+      formatter: sharegpt
+      num_samples: 40
+
+    - dataset: anthracite-org/stheno-filtered-v1.1
+      bucket: roleplay
+      split: train
+      columns: [conversations]
+      formatter: sharegpt
+      num_samples: 35
+
+    - dataset: anthracite-org/kalo-opus-instruct-22k-no-refusal
+      bucket: roleplay
+      split: train
+      columns: [conversations]
+      formatter: sharegpt
+      num_samples: 25
+
+
+    # ================================================
+    # GENERAL REASONING — 50 samples (10%)
+    # Keeps the <think> prefill path in the measurement.
+    # ================================================
+
+    - dataset: open-thoughts/OpenThoughts-114k
+      bucket: reasoning
+      split: train
+      columns: [conversations]
+      formatter: sharegpt
+      num_samples: 20
+
+    - dataset: nvidia/OpenMathReasoning
+      bucket: reasoning
+      split: cot
+      columns: [problem, generated_solution]
+      formatter: prompt_answer
+      num_samples: 15
+      streaming: true
+
+    - dataset: PJMixers/grimulkan_theory-of-mind-ShareGPT
+      bucket: reasoning
+      split: train
+      columns: [conversations]
+      formatter: sharegpt
+      num_samples: 15
+
+
+    # ================================================
+    # GENERAL BREADTH — 50 samples (10%)
+    # ================================================
+
+    - dataset: HuggingFaceH4/ultrachat_200k
+      bucket: breadth
+      split: train_sft
+      columns: [messages]
+      formatter: chat_completion
+      num_samples: 20
+
+    - dataset: databricks/databricks-dolly-15k
+      bucket: breadth
+      split: train
+      columns: [instruction, response]
+      formatter: prompt_answer
+      num_samples: 15
+
+    - dataset: ruggsea/stanford-encyclopedia-of-philosophy_instruct
+      bucket: breadth
+      split: train
+      columns: [question, answer]
+      formatter: prompt_answer
+      num_samples: 15

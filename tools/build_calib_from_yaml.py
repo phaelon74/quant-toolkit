@@ -16,6 +16,7 @@ chat_completion, raw_text.
 """
 
 import argparse
+import hashlib
 import importlib.util
 import json
 import os
@@ -40,6 +41,11 @@ ap.add_argument("--min-chars", type=int, default=48,
                 help="Drop samples whose total content is under this.")
 ap.add_argument("--seed", type=int, default=None,
                 help="Override the seed in the YAML.")
+ap.add_argument("--exclude", nargs="*", default=[],
+                help="JSONL files whose samples must not reappear in the output. "
+                     "Use when building a held-out eval set: a different --seed "
+                     "reshuffles but can still draw the same rows, so only an "
+                     "explicit exclusion makes the split actually disjoint.")
 args = ap.parse_args()
 
 
@@ -283,6 +289,33 @@ def collect(entry, seed, default_len):
     return picked
 
 
+FINGERPRINT_CHARS = 1024
+
+
+def fingerprint(msgs):
+    """Hash of a sample's leading text, for matching against an existing JSONL.
+
+    Deliberately a prefix, not the whole body. Samples already written to disk
+    were think-normalized and truncated to a character budget, so a full-body
+    hash of a freshly drawn row would never match its own earlier copy. The
+    head survives both transforms.
+    """
+    body = "\x00".join(m["content"].strip() for m in msgs)
+    return hashlib.sha1(body[:FINGERPRINT_CHARS].encode("utf-8")).hexdigest()
+
+
+def load_excluded(paths):
+    seen = set()
+    for path in paths:
+        with open(path, encoding="utf-8") as f:
+            for raw in f:
+                raw = raw.strip()
+                if raw:
+                    seen.add(fingerprint(json.loads(raw)["messages"]))
+        print(f"  excluding {len(seen)} cumulative sample(s) after {path}")
+    return seen
+
+
 def main():
     with open(args.yaml, encoding="utf-8") as f:
         spec = yaml.safe_load(f)["calibration_set"]
@@ -307,13 +340,19 @@ def main():
     if spec.get("shuffle", True):
         random.shuffle(samples)
 
-    groups, buckets, truncated, dropped_short = {}, {}, 0, 0
+    excluded = load_excluded(args.exclude) if args.exclude else set()
+
+    groups, buckets, truncated, dropped_short, dropped_dup = {}, {}, 0, 0, 0
     for sample in samples:
         msgs = sample["messages"]
         if args.think_tag:
             for m in msgs:
                 if m["role"] == "assistant":
                     m["content"] = normalize_think(m["content"], args.think_tag)
+
+        if excluded and fingerprint(msgs) in excluded:
+            dropped_dup += 1
+            continue
 
         total = sum(len(m["content"]) for m in msgs)
         if total < args.min_chars:
@@ -336,7 +375,8 @@ def main():
 
     kept = sum(len(v) for v in groups.values())
     print(f"\nCollected {len(samples)}/{planned}; kept {kept} "
-          f"({truncated} truncated to budget, {dropped_short} dropped as too short).")
+          f"({truncated} truncated to budget, {dropped_short} dropped as too short"
+          f"{f', {dropped_dup} dropped as excluded' if args.exclude else ''}).")
 
     if buckets:
         print("\nBucket mix:")

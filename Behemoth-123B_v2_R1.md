@@ -59,6 +59,8 @@ base_quant_cfg="NVFP4_OMLP_ONLY_CFG",
 
 Their PTQ guidance is to start at the narrowest activation-quantized scope and widen only as far as your target requires: `mlp_only` → `omlp_only` → `default`, describing `omlp_only` as *"a middle ground… adds the o_proj GEMM (often safe) without quantizing the more sensitive q/k/v projections."* The explicit q/k/v disables in the adapter are redundant against that preset and kept as insurance.
 
+A second adapter, `behemoth_r1_123b_q`, adds `q_proj` to that scope and nothing else. It is built up from `NVFP4_DEFAULT_CFG` with k/v, embeddings and the head subtracted, **not** from `NVFP4_OMLP_ONLY_CFG` with `q_proj` re-enabled — that preset never creates `q_proj` quantizers, so no override can switch them back on. Starting from the everything-preset and subtracting is the only construction that reliably puts `q_proj` in scope. See "Size at each scope" below for why it exists.
+
 ### Why this split and not another
 
 The [FP4 inference sensitivity analysis](https://arxiv.org/html/2603.08747v1) measures activation outlier ratio (max ÷ P99.9) per component. Higher is harder to quantize:
@@ -68,7 +70,7 @@ The [FP4 inference sensitivity analysis](https://arxiv.org/html/2603.08747v1) me
 | `down_proj` | **80–334×** | Worst in the model — and it is inside the MLP we must quantize. This is what the calibration algorithm in §4 exists to handle. |
 | `up_proj` / `gate_proj` | 5.5–11× | Fine. |
 | `v_proj` | 2.9–4.8× | Moderate, and only 1.1 B params. Not worth it. |
-| `q_proj` | 2.9–4.7× | Moderate. 10.8% of params for real risk — skipped. |
+| `q_proj` | 2.9–4.7× | Moderate, and 10.8% of params. Skipped by default, but it is 29% of the exported file — quantized in the `behemoth_r1_123b_q` variant so the cost can be measured rather than assumed. |
 | `k_proj` | ~2.9–4.9× | Second-least sensitive, but only 1.1 B params. Nothing to gain. |
 | `o_proj` | **2.6–3.6×** | **Lowest in the model.** 10.8% of params, free speed. Quantize it. |
 
@@ -83,10 +85,39 @@ NVFP4 stores 4 bits per weight plus one FP8-E4M3 scale per 16-element block = 4.
 | Scope | NVFP4 | BF16 | Total | vs BF16 |
 | --- | ---: | ---: | ---: | ---: |
 | `mlp_only` (first pass) | 93.0 B | 29.6 B | 111.5 GB | 2.06× |
-| **`omlp_only` (this recipe)** | 106.3 B | 16.3 B | **92.4 GB** | **2.48×** |
+| **`omlp_only` (`behemoth_r1_123b`)** | 106.3 B | 16.3 B | **92.4 GB** | **2.48×** |
+| **`omlp_only` + `q_proj` (`behemoth_r1_123b_q`)** | 119.6 B | 3.0 B | **73.3 GB** | **3.13×** |
 | `default`, embeds BF16 | 121.8 B | 0.8 B | 70.1 GB | 3.27× |
 
-Adding `o_proj` to the first-pass recipe saves 19 GB and moves 10.8% more of the model onto FP4 tensor cores. Going further to `default` saves another 22 GB but puts all of `q/k/v` at risk — the wrong trade for a prose model.
+The `omlp_only` row is confirmed by measurement, not estimated: the export reports 86.1 GiB, which is 92.41 GB decimal. Treat the table as reliable.
+
+Adding `o_proj` to the first-pass recipe saves 19 GB and moves 10.8% more of the model onto FP4 tensor cores.
+
+### Why the file is not a quarter of BF16
+
+The obvious expectation is 245.2 GB ÷ 4 = 61.3 GB, and `omlp_only` lands 51% above it. Two effects compound:
+
+| Component | Params | Bytes/param | Size |
+| --- | ---: | ---: | ---: |
+| NVFP4 weights | 106.30 B | 0.5 | 53.15 GB |
+| NVFP4 block scales | — | 0.0625 | 6.64 GB |
+| `q_proj` BF16 | 13.29 B | 2 | **26.58 GB** |
+| `k_proj` + `v_proj` BF16 | 2.21 B | 2 | 4.43 GB |
+| `embed_tokens` + `lm_head` BF16 | 0.81 B | 2 | 1.61 GB |
+
+First, **86.7% of parameters are 4-bit but only 65% of the bytes.** BF16 costs 3.6× more per parameter than NVFP4-with-scales, so the 13.3% left out becomes 35% of the file. Second, the block scales are not optional overhead you can tune away: one FP8 byte per 16 weights is 12.5% on top of every quantized tensor, and `group_size` must stay 16 because b12x hardcodes `sf_vec_size=16` (§3).
+
+A literal quarter of BF16 is unreachable in this format. With embeddings and `lm_head` in BF16 — which they should be — **~70 GB is the floor at any scope.**
+
+### The `q_proj` variant, and why it is about latency rather than disk
+
+`q_proj` alone is 26.58 GB, 29% of the checkpoint. GQA makes this counterintuitive: "keep QKV in BF16" sounds cheap, but with 8 KV heads `k_proj` and `v_proj` are 12.6 M params each while `q_proj` is 151 M — the same size as `o_proj`, which we already quantize. The 26.6 GB QKV bill is almost entirely Q.
+
+Quantizing only `q_proj` captures 19.1 of the 24 GB available from attention and leaves k/v — the widest activation range per parameter, and the projections feeding the KV cache — untouched for 4.4 GB. Adding k/v as well only reaches 70.1 GB, the worst size-to-risk ratio in the model.
+
+Disk is not the reason to do this. At 86 GiB across four cards you use 21.6 GiB per GPU and have ~62 GiB of KV cache each; there is no pressure. The reason is §3's finding that TP4 on SM120 pays 176 PCIe all-reduces per token with every fast path disabled. **At ~68 GiB the model loads on a single 96 GB card**, which removes tensor parallelism entirely and lets you run four independent replicas. At 86 GiB that is not possible.
+
+This is a hypothesis about a quality/latency trade, so it is not the default. `behemoth_r1_123b_q` exists to be measured against `behemoth_r1_123b` — see §6.6.
 
 ### KV cache in BF16 costs you very little here
 
@@ -331,6 +362,8 @@ Raise `--batch-tokens` to 65536 if the first batches leave headroom; drop to 163
 
 Disk: 229 GB source + ~92 GB export + a few GB of amax on 2 TB. Fine.
 
+For the smaller `q_proj` variant, `scripts/quantize_behemoth_r1_123b_q.sh` runs the same command with `--model behemoth_r1_123b_q` and its own working and final paths. The calibration TOML is shared deliberately: identical data and method mean a KLD comparison between the two exports isolates the effect of quantizing `q_proj` and nothing else. **The amax file from the default run is not reusable** — `q_proj` had no quantizers then, so its amaxes do not exist and calibration has to run again in full.
+
 Expected log landmarks:
 
 1. Calibration plan — 2 datasets: batch 8 @ maxlen 4096, batch 4 @ maxlen 8192
@@ -374,6 +407,65 @@ Do not hand-check this with `q.get("group_size")`. ModelOpt ≥ 0.29 emits the *
 Reading the flat keys against this reports false failures on a perfectly good checkpoint — and, far worse, silently misses real FP8 KV, which only ever surfaces as `kv_cache_scheme` here. `tools/verify_nvfp4_export.py` handles both.
 
 For this recipe `ignore` should hold exactly **266** entries: 88 × 3 for `q/k/v_proj`, plus `lm_head` and `model.embed_tokens`. Note these are literal module paths, not wildcards — vLLM `fnmatch`es them, and an exact string matches itself. It returns `UnquantizedLinearMethod` for those, so a partially quantized NVFP4 checkpoint is a supported configuration, not a hack.
+
+Pass `--scope omlp-q` when verifying the `behemoth_r1_123b_q` export, or the tool will correctly fail it for having quantized `q_proj`. The two scopes are numerically distinguishable, which is the cheapest way to confirm the config actually took:
+
+| | `omlp` | `omlp-q` |
+| --- | ---: | ---: |
+| NVFP4 modules | 352 | 440 |
+| Index tensors | 1851 | 2115 |
+| `ignore` entries | 266 | 178 |
+| Amax entries | 704 | 880 |
+| Total size | 86.1 GiB | ~68.3 GiB |
+
+### 6.6 Measuring the two variants against BF16
+
+Perplexity on its own is not enough to choose between these. A quant can hold PPL flat while reshuffling the distribution below the argmax, and that reshuffling is exactly what degrades long-form prose. `tools/kld_eval.py` reports KL divergence against the BF16 model, plus PPL and top-1 agreement.
+
+It is teacher-forced and deterministic, and sends **token IDs rather than text** so both runs score byte-identical positions — no tokenizer drift can slip in between reference and candidate. It refuses to compare two runs whose prompt IDs differ. Rows with a `messages` field go through the chat template, so the scored tokens are the ones the model sees when served; scoring raw text would measure a distribution nobody uses.
+
+**Build the held-out set first.** `data/behemoth_r1_123b_eval.yaml` mirrors the calibration mix at 60/20/10/10 with 500 samples. Both a new seed *and* `--exclude` are required: a different seed reshuffles, but can still draw rows the calibration run already used, and measuring drift on data the scales were fitted to understates it.
+
+```bash
+python tools/build_calib_from_yaml.py \
+    --yaml data/behemoth_r1_123b_eval.yaml \
+    --output data/text/behemoth_r1_123b_eval.jsonl \
+    --think-tag think \
+    --exclude data/text/behemoth_r1_123b_calib_4096.jsonl \
+              data/text/behemoth_r1_123b_calib_8192.jsonl
+```
+
+`--exclude` matches on a hash of each sample's first 1024 characters, not the whole body. Samples already on disk were think-normalized and truncated to a character budget, so a full-body hash would never match its own earlier copy; the head survives both transforms.
+
+**Serve each model in turn and collect.** `--max-logprobs 64` is not optional — vLLM defaults to 20, which is too coarse for a stable KLD tail, and the tool warns if the candidate's top-k fails to cover 98% of the reference's probability mass.
+
+```bash
+vllm serve /media/fmodels/TheDrummer/Behemoth-R1-123B-v2 \
+    --served-model-name behemoth-bf16 \
+    --tensor-parallel-size 4 --max-model-len 8192 \
+    --max-logprobs 64 --gpu-memory-utilization 0.90
+
+python tools/kld_eval.py collect \
+    --model behemoth-bf16 \
+    --tokenizer /media/fmodels/TheDrummer/Behemoth-R1-123B-v2 \
+    --texts data/text/behemoth_r1_123b_eval_8192.jsonl \
+    --out /media/fmodels2/working_Model-Opt/kld/bf16.npz \
+    --seq-len 1024 --max-seqs 256 -k 64
+```
+
+Repeat for each NVFP4 export with the same `--texts`, `--seq-len` and `-k`. Use `--tensor-parallel-size 4` for the quantized runs too, even though the 68 GiB variant would serve faster at TP1: matching the all-reduce order removes the last confound, and 262k tokens of prefill finishes in minutes at any TP size.
+
+```bash
+python tools/kld_eval.py compare \
+    /media/fmodels2/working_Model-Opt/kld/bf16.npz \
+    /media/fmodels2/working_Model-Opt/kld/nvfp4_omlp_q.npz
+```
+
+**Read p99, not the mean.** The mean is dominated by the overwhelming majority of positions where the model is confident and quantization changes nothing. p99 is the tail where the quant changed its mind, and for creative writing that tail is what you feel. Rough bands for the mean: below 0.01 excellent, 0.01–0.05 good, 0.05–0.15 noticeable, above 0.15 expect visible loss in long generations.
+
+Reported KLD is a floor. When a reference token falls outside the candidate's top-k, the tool assigns it the candidate's smallest observed logprob — the most generous available bound — so the true divergence can only be larger than reported, never smaller.
+
+Expect the default `omlp` export to score very low: with `q_proj` in BF16, attention is close to exact. The number that decides whether the 68 GiB variant is worth serving is its p99 relative to the default's.
 
 ## 7. Serving on vLLM / SM120
 
