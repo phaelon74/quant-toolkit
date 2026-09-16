@@ -328,7 +328,30 @@ def cmd_compare(args):
 
     ref_top1 = ref_ids[np.arange(n), np.argmax(ref_lp, axis=1)]
     cand_top1 = cand_ids[np.arange(n), np.argmax(cand_lp, axis=1)]
-    agree = float((ref_top1 == cand_top1).mean())
+    kept_top1 = ref_top1 == cand_top1
+
+    # Confidence of the reference at each position. ref_lp are true logprobs
+    # from the model, not renormalized, so this is the real top-1 probability.
+    ref_conf = np.exp(np.max(ref_lp, axis=1))
+
+    # This is the headline, printed first and on purpose. KL divergence measures
+    # how far the distribution moved; agreement measures how often the decision
+    # changed, and generation is a chain of decisions. Stratifying by the
+    # reference's confidence separates the two failure modes that a single
+    # agreement number conflates: a flip where BF16 was split 51/49 is style,
+    # a flip where BF16 was at 90% is the model getting something wrong.
+    print("\n=== token decision agreement  (capability proxy) ===")
+    line("top-1 match, all positions", f"{kept_top1.mean() * 100:6.2f}%",
+         f"{n} pos")
+    for floor_p, label in ((0.5, "confident"), (0.9, "near-certain")):
+        sel = ref_conf > floor_p
+        if sel.sum():
+            line(f"top-1 match where ref p>{floor_p}",
+                 f"{kept_top1[sel].mean() * 100:6.2f}%",
+                 f"{int(sel.sum())} pos, {label}")
+    print("  Read the bottom row first. Flips at near-certain positions are")
+    print("  capability loss; flips at low-confidence positions are mostly")
+    print("  interchangeable word choice and cost you little.")
 
     ref_ppl = float(np.exp(-ref["actual_lp"].mean()))
     cand_ppl = float(np.exp(-cand["actual_lp"].mean()))
@@ -355,17 +378,24 @@ def cmd_compare(args):
 
     per_pos = position_buckets(ref, args)
     if per_pos is not None:
-        print("\n=== divergence by domain ===")
+        print("\n=== by domain ===")
+        print(f"  {'':<24} {'KLD mean':>9} {'KLD p99':>9} "
+              f"{'top-1':>7} {'top-1 p>0.9':>12}")
         for name in sorted(set(per_pos.tolist())):
-            sel = kld[per_pos == name]
-            line(name, f"mean {sel.mean():.6f}   p99 {np.percentile(sel, 99):.6f}",
-                 f"{len(sel):>7} pos")
+            sel = per_pos == name
+            k_sel = kld[sel]
+            sure = sel & (ref_conf > 0.9)
+            sure_txt = (f"{kept_top1[sure].mean() * 100:11.2f}%"
+                        if sure.sum() else f"{'n/a':>12}")
+            print(f"  {name:<24} {k_sel.mean():9.6f} "
+                  f"{np.percentile(k_sel, 99):9.6f} "
+                  f"{kept_top1[sel].mean() * 100:6.2f}% {sure_txt}")
         print("  An aggregate cannot separate lost reasoning from lost prose")
-        print("  style. This can: compare the reasoning row against the")
-        print("  creative_writing row rather than reading the overall mean.")
+        print("  style. This can. Creative writing is inherently higher-entropy,")
+        print("  so some of its KLD is intrinsic rather than damage -- which is")
+        print("  why the two top-1 columns are the fairer cross-domain read.")
 
-    print("\n=== agreement ===")
-    line("top-1 match", f"{agree * 100:.2f}%")
+    print("\n=== measurement quality ===")
     line("ref mass inside cand top-k", f"{covered.mean() * 100:.3f}%",
          "low values mean -k was too small")
 
@@ -374,6 +404,9 @@ def cmd_compare(args):
     print("            >0.15 expect visible quality loss in long generations.")
     print("  p99 matters more than the mean for creative writing: it is the")
     print("  tail of positions where the quant changed its mind.")
+    print("  Neither number is a capability measure. For that, compare the")
+    print("  near-certain agreement rate above across variants, and run a task")
+    print("  benchmark -- see install-eval-bench_CreativeWriting.md.")
 
     if covered.mean() < 0.98:
         print("\n  WARNING: candidate top-k covers only "
