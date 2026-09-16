@@ -74,14 +74,14 @@ def load_windows(texts_path, tokenizer_dir, seq_len, max_seqs):
     makes the two runs trivially comparable. Short documents are dropped rather
     than padded; padding would score meaningless positions.
 
-    Returns (windows, rejected count, per-document token lengths). The lengths
-    are only used to explain a zero-window result.
+    Returns (windows, bucket label per window, rejected count, per-document
+    token lengths). The lengths are only used to explain a zero-window result.
     """
     from transformers import AutoTokenizer
 
     tok = AutoTokenizer.from_pretrained(tokenizer_dir, trust_remote_code=False)
 
-    windows, rejected, doc_lens = [], [0], []
+    windows, labels, rejected, doc_lens = [], [], [0], []
     with open(texts_path, encoding="utf-8") as f:
         for raw in f:
             raw = raw.strip()
@@ -107,11 +107,13 @@ def load_windows(texts_path, tokenizer_dir, seq_len, max_seqs):
                 continue
 
             doc_lens.append(len(ids))
+            bucket = row.get("bucket") or "unlabeled"
             for start in range(0, len(ids) - seq_len + 1, seq_len):
                 windows.append(ids[start:start + seq_len])
+                labels.append(bucket)
                 if len(windows) >= max_seqs:
-                    return windows, rejected[0], doc_lens
-    return windows, rejected[0], doc_lens
+                    return windows, labels, rejected[0], doc_lens
+    return windows, labels, rejected[0], doc_lens
 
 
 def score_window(session, args, ids):
@@ -166,8 +168,8 @@ def cmd_collect(args):
     import requests
 
     print("\n=== corpus ===")
-    windows, rejected, doc_lens = load_windows(args.texts, args.tokenizer,
-                                               args.seq_len, args.max_seqs)
+    windows, labels, rejected, doc_lens = load_windows(
+        args.texts, args.tokenizer, args.seq_len, args.max_seqs)
     line("texts", args.texts)
     line("documents tokenized", len(doc_lens))
     if doc_lens:
@@ -217,6 +219,7 @@ def cmd_collect(args):
         top_ids=top_ids,
         top_lp=top_lp,
         prompt_ids=np.asarray(windows, dtype=np.int32),
+        buckets=np.asarray(labels),
         meta=json.dumps({"model": args.model, "seq_len": args.seq_len,
                          "k": args.k, "texts": str(args.texts)}),
     )
@@ -235,6 +238,38 @@ def logsumexp(a, axis):
     peak = np.where(np.isfinite(peak), peak, 0.0)
     return np.squeeze(peak, axis=axis) + np.log(
         np.exp(a - peak).sum(axis=axis))
+
+
+def position_buckets(ref, args):
+    """Per-position bucket labels, or None if they cannot be established.
+
+    Prefers labels saved at collect time. Falls back to re-deriving them from
+    the eval JSONL, which makes .npz files collected before --keep-bucket
+    existed usable without re-serving the reference model -- but only if the
+    re-derived windows are token-identical to the saved ones. Mislabelled
+    domains would be worse than no domain breakdown, so a mismatch reports and
+    gives up rather than guessing.
+    """
+    n_seq, seq_len = ref["prompt_ids"].shape
+
+    if "buckets" in ref.files:
+        labels = [str(x) for x in ref["buckets"]]
+    elif args.texts and args.tokenizer:
+        windows, labels, _, _ = load_windows(args.texts, args.tokenizer,
+                                             seq_len, n_seq)
+        if not np.array_equal(np.asarray(windows, dtype=np.int32),
+                              ref["prompt_ids"]):
+            print("\n  note: --texts re-tokenized to different windows than the "
+                  "reference was\n  scored on, so no domain breakdown. Rebuild "
+                  "the eval JSONL with the same\n  seed, or re-collect with "
+                  "--keep-bucket data.")
+            return None
+    else:
+        return None
+
+    if len(labels) != n_seq or set(labels) == {"unlabeled"}:
+        return None
+    return np.repeat(np.asarray(labels), seq_len - 1)
 
 
 def cmd_compare(args):
@@ -318,6 +353,17 @@ def cmd_compare(args):
         line(f"positions > {thresh:.2f} nats",
              f"{share * 100:6.3f}%", f"{int(share * n):>8} of {n}")
 
+    per_pos = position_buckets(ref, args)
+    if per_pos is not None:
+        print("\n=== divergence by domain ===")
+        for name in sorted(set(per_pos.tolist())):
+            sel = kld[per_pos == name]
+            line(name, f"mean {sel.mean():.6f}   p99 {np.percentile(sel, 99):.6f}",
+                 f"{len(sel):>7} pos")
+        print("  An aggregate cannot separate lost reasoning from lost prose")
+        print("  style. This can: compare the reasoning row against the")
+        print("  creative_writing row rather than reading the overall mean.")
+
     print("\n=== agreement ===")
     line("top-1 match", f"{agree * 100:.2f}%")
     line("ref mass inside cand top-k", f"{covered.mean() * 100:.3f}%",
@@ -362,6 +408,11 @@ c.set_defaults(func=cmd_collect)
 m = sub.add_parser("compare", help="Compare two collected .npz files.")
 m.add_argument("reference", help=".npz from the BF16 model.")
 m.add_argument("candidate", help=".npz from the quantized model.")
+m.add_argument("--texts", default=None,
+               help="Eval JSONL carrying 'bucket' labels. Only needed to get a "
+                    "per-domain breakdown out of .npz files collected before "
+                    "labels were saved; verified against the stored prompt IDs.")
+m.add_argument("--tokenizer", default=None, help="Required with --texts.")
 m.set_defaults(func=cmd_compare)
 
 args = ap.parse_args()

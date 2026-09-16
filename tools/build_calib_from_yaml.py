@@ -41,6 +41,11 @@ ap.add_argument("--min-chars", type=int, default=48,
                 help="Drop samples whose total content is under this.")
 ap.add_argument("--seed", type=int, default=None,
                 help="Override the seed in the YAML.")
+ap.add_argument("--keep-bucket", action="store_true",
+                help="Write each sample's bucket label alongside its messages. "
+                     "For eval sets scored by tools/kld_eval.py, which reports "
+                     "divergence per bucket. Off by default: calibration JSONLs "
+                     "are consumed by quantize.py and should stay minimal.")
 ap.add_argument("--exclude", nargs="*", default=[],
                 help="JSONL files whose samples must not reappear in the output. "
                      "Use when building a held-out eval set: a different --seed "
@@ -370,7 +375,10 @@ def main():
                 dropped_short += 1
                 continue
 
-        groups.setdefault(sample["_len"], []).append({"messages": msgs})
+        row = {"messages": msgs}
+        if args.keep_bucket:
+            row["bucket"] = sample["_bucket"]
+        groups.setdefault(sample["_len"], []).append(row)
         buckets[sample["_bucket"]] = buckets.get(sample["_bucket"], 0) + 1
 
     kept = sum(len(v) for v in groups.values())
