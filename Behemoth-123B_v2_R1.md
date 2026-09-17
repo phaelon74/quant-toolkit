@@ -573,7 +573,32 @@ Two conclusions worth carrying forward.
 
 **Almost every argmax flip is at a position BF16 was unsure about.** Decomposing the confidence bands, roughly 91% of the ~15,400 flips occur where the reference was itself under 50% confident. Where BF16 was near-certain, the quant disagrees about 64 times in 91,200 decisions. Reasoning at 99.98% and breadth at 100.00% mean essentially no confident decision changed outside prose. Read the p > 0.9 row and ignore the headline 94.10%, which mostly counts interchangeable word choice.
 
-This is the bar for the `q_proj` variant, and it shows the headroom: 99.85% near-certain agreement would be roughly 130 flips instead of 64 — imperceptible in practice. A variant that holds above ~99.8% should be taken for the single-GPU serving it unlocks.
+This is the bar for the smaller variant, and it shows the headroom: 99.85% near-certain agreement would be roughly 130 flips instead of 64 — imperceptible in practice. A variant that holds above ~99.8% should be taken for the single-GPU serving it unlocks.
+
+### Measured: `all-linear` versus `omlp`, same corpus
+
+| Candidate | conf. agree (p>0.9) | flips / 10k | all positions | PPL | KLD mean | entropy |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `omlp`, 86.1 GiB | 99.930% | 2.44 | 94.10% | +1.51% | 0.0198 | −0.24% |
+| **`all-linear`, 65.3 GiB** | **99.927%** | **2.56** | 93.57% | +1.76% | 0.0230 | +0.43% |
+
+**Quantizing all of attention is free.** The cost of moving q/k/v from BF16 to NVFP4 W4A4 is 0.003 percentage points of near-certain agreement — 0.12 additional confident flips per 10,000 tokens. That is far inside the ~99.8% threshold set above, and it buys 21 GiB and single-GPU serving.
+
+It also disposes of two hypotheses. NVFP4 W4A4 on attention is not inherently destructive, and `behemoth_r1_123b_qkv_a16` is not needed: weight-only NVFP4 on q/k/v exists to buy back accuracy that, measured, was never lost. Do not build it without a specific reason.
+
+### The failure that produced this, and the check that now catches it
+
+The first `all-linear` export scored **PPL 16330, 1.388% confident agreement, entropy +228%** — noise, not degradation. It passed `verify_nvfp4_export.py` completely.
+
+The cause: **`q_proj`, `k_proj` and `v_proj` had three different `weight_scale_2` values.** vLLM concatenates them into one `QKVParallelLinear` served from a single scale, so two of the three were dequantized against a scale that was wrong for them. GQA makes the spread severe rather than marginal — `v_proj`'s weight range runs an order of magnitude under `q_proj`'s, measured at 90.9% spread in layer 0 — so `v_proj` was quantized against a scale roughly 11× too coarse and V became noise.
+
+`quantize.py` had always tied `gate_proj` and `up_proj` amaxes for exactly this reason on the fused w13 path. Nothing tied q/k/v, because until an adapter put attention in scope, `COMMON_QUANT_OVERRIDES` disabled it and the case never arose. `_tie_group` now covers both, and the log reports `Tied q/k/v weight_quantizer amax for 88 attention block(s).`
+
+Two lessons worth keeping:
+
+**Structural verification cannot catch this.** A wrong scale is finite, non-zero, correctly shaped and correctly dtyped. `tools/audit_nvfp4_scales.py` exists for the numerical question instead: every projection's `weight_scale_2` must be the same fixed multiple of the absmax it derives from, where a fused group's basis is the *group's* maximum, not each member's own. That single test catches an untied group, and it is constant-free.
+
+**The diagnostic is inverted from intuition.** In a healthy export the tied members deviate from their own absmax and a `(tied up)` marker appears; a fused group whose members each sit at exactly their own ratio is the broken one. The first audit run flagged `up_proj` at 1.146× — correct tying — while q/k/v read a reassuring 1.0000× each, which was the bug.
 
 ## 7. Serving on vLLM / SM120
 
