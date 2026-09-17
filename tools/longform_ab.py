@@ -129,6 +129,20 @@ def chat(session, args, messages, seed, max_tokens):
             f"  currently served: {served_models(session, args) or 'unknown'}\n"
             f"  Pass --model with one of those, or restart vllm serve with "
             f"--served-model-name {args.model}.")
+    if resp.status_code == 400 and "context length" in resp.text:
+        # Every premise is one growing conversation: plan, characters, then each
+        # chapter appended. The last call carries the whole story, so a
+        # --max-model-len sized for single-turn scoring fails partway through
+        # and only on the later chapters.
+        raise RuntimeError(
+            f"400: the conversation outgrew the server's context window at "
+            f"~{sum(len(m['content']) for m in messages) // 4} prompt tokens "
+            f"plus {max_tokens} to generate.\n"
+            f"  This harness accumulates all {len(messages) // 2} turns so far, "
+            f"so it needs far more context than teacher-forced scoring does.\n"
+            f"  Restart vllm serve with --max-model-len 65536 and use the same "
+            f"value for every model being compared.\n"
+            f"  server said: {resp.text[:200]}")
     if resp.status_code != 200:
         raise RuntimeError(f"{resp.status_code} from server: {resp.text[:400]}")
     body = resp.json()
