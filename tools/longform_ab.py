@@ -95,6 +95,17 @@ do not include notes to the reader, and do not write a chapter heading beyond \
 the chapter number and title."""
 
 
+def served_models(session, args):
+    """Model ids the endpoint advertises, for error messages only."""
+    try:
+        resp = session.get(args.base_url.rstrip("/") + "/models",
+                           headers={"Authorization": f"Bearer {args.api_key}"},
+                           timeout=30)
+        return ", ".join(repr(m["id"]) for m in resp.json().get("data", []))
+    except Exception:
+        return ""
+
+
 def chat(session, args, messages, seed, max_tokens):
     payload = {
         "model": args.model,
@@ -110,6 +121,14 @@ def chat(session, args, messages, seed, max_tokens):
                         json=payload,
                         headers={"Authorization": f"Bearer {args.api_key}"},
                         timeout=args.timeout)
+    if resp.status_code == 404:
+        # Three runs means swapping the served model twice, so name mismatches
+        # are the expected failure. Say what is actually being served.
+        raise RuntimeError(
+            f"404: the server has no model named {args.model!r}.\n"
+            f"  currently served: {served_models(session, args) or 'unknown'}\n"
+            f"  Pass --model with one of those, or restart vllm serve with "
+            f"--served-model-name {args.model}.")
     if resp.status_code != 200:
         raise RuntimeError(f"{resp.status_code} from server: {resp.text[:400]}")
     body = resp.json()
