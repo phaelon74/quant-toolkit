@@ -95,6 +95,27 @@ do not include notes to the reader, and do not write a chapter heading beyond \
 the chapter number and title."""
 
 
+SENTENCE_END = re.compile(r'[.!?]["\u201d\u2019\')]*(?=\s|$)')
+
+
+def trim_to_sentence(text):
+    """Drop a trailing fragment left by a max_tokens cut.
+
+    This tune writes past any length instruction and every chapter ends on
+    finish_reason=length, so blind readers would otherwise be judging where the
+    budget ran out. Metrics still score the untrimmed text -- a cut costs at most
+    one sentence out of ~3,300 words, and trimming there would silently change
+    what is being measured. Only the human-facing pairs are trimmed.
+    """
+    ends = list(SENTENCE_END.finditer(text))
+    if not ends:
+        return text
+    cut = ends[-1].end()
+    # A cut that discards a lot means the fragment was not a stray clause and
+    # something else is going on; leave it alone and stay visible.
+    return text[:cut].rstrip() if len(text) - cut < 400 else text
+
+
 def served_models(session, args):
     """Model ids the endpoint advertises, for error messages only."""
     try:
@@ -535,12 +556,19 @@ def cmd_metrics(args):
                                  for r in results))
         line("cast coverage", f"{sum(r['entities']['cast_coverage'] for r in results) / len(results) * 100:.1f}%")
 
-    if trunc_pct > 25:
+    if trunc_pct >= 95:
+        print(f"\n  Every chapter stopped on finish_reason=length. This model")
+        print("  writes past its length instruction and will not stop on its own,")
+        print("  so --chapter-tokens is a fixed budget rather than a ceiling the")
+        print("  model occasionally hits. That is a sound comparison as long as")
+        print("  every run uses the same value, but length adherence cannot be")
+        print("  measured at all -- ignore length MAE rather than reading it.")
+        print("  `pair` trims trailing fragments so readers do not judge the cut.")
+    elif trunc_pct > 25:
         print(f"\n  {trunc_pct:.0f}% of chapters stopped on finish_reason=length,")
-        print("  so chapter length reflects --chapter-tokens rather than the")
-        print("  model, and length MAE above measures the ceiling. Chapters also")
-        print("  end mid-sentence, which contaminates the blind pairs. Raise")
-        print("  --chapter-tokens and regenerate before comparing runs.")
+        print("  so length MAE above is part model and part ceiling, which is")
+        print("  worse than either. Raise --chapter-tokens until truncation is")
+        print("  rare, or lower it until it is universal; a mix is a confound.")
 
     if looped:
         print("\n  A repetition loop disqualifies a checkpoint on its own.")
@@ -597,7 +625,10 @@ def cmd_pair(args):
             body = [f"# {pid} — {side}", "", f"> {story['premise']}", ""]
             for step in story["steps"]:
                 if step["step"].startswith("chapter"):
-                    body += [f"## {step['step']}", "", step["text"], ""]
+                    text = step["text"]
+                    if step["finish_reason"] == "length":
+                        text = trim_to_sentence(text)
+                    body += [f"## {step['step']}", "", text, ""]
             (pdir / f"{side}.md").write_text("\n".join(body), encoding="utf-8")
 
         verdicts[pid] = {"winner": None, "confidence": None, "note": ""}
