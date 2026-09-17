@@ -10,9 +10,12 @@ Checks, in order of how expensive they are to discover later:
      kv_cache_quant_algo depending on layout; if either is set, the KV override
      did not take.
   2. group_size is 16. b12x hardcodes sf_vec_size=16.
-  3. Quantization scope, per --scope. "omlp" expects scales on
-     o_proj/gate_proj/up_proj/down_proj only; "omlp-q" also expects them on
-     q_proj. Everything outside the chosen scope must still be plain BF16.
+  3. Quantization scope, per --scope. Everything outside the chosen scope must
+     still be plain BF16.
+  3b. Fused layer groups carry one precision. vLLM merges q/k/v into
+     QKVParallelLinear and gate/up into MergedColumnParallelLinear, and rejects
+     a group whose shards disagree. Every per-module check can pass while the
+     checkpoint is unloadable, so this is checked separately.
   4. Every unquantized linear is listed in ignore / exclude_modules. Because
      targets is ["Linear"], anything unlisted gets an NVFP4 linear method, looks
      for a weight_scale that does not exist, and fails at load, not at export.
@@ -42,15 +45,33 @@ from pathlib import Path
 SCOPES = {
     "omlp": (("o_proj", "gate_proj", "up_proj", "down_proj"),
              ("q_proj", "k_proj", "v_proj", "lm_head", "embed_tokens")),
+    # Loads in ModelOpt and exports cleanly, but vLLM cannot serve it. Kept so
+    # such an export can still be inspected, not because it is usable.
     "omlp-q": (("o_proj", "gate_proj", "up_proj", "down_proj", "q_proj"),
                ("k_proj", "v_proj", "lm_head", "embed_tokens")),
+    "all-linear": (("q_proj", "k_proj", "v_proj", "o_proj",
+                    "gate_proj", "up_proj", "down_proj"),
+                   ("lm_head", "embed_tokens")),
+}
+
+# vLLM fuses these into single layers -- QKVParallelLinear and
+# MergedColumnParallelLinear -- and a fused layer must have one precision across
+# every shard. A mix raises "Detected some but not all shards of ... are
+# quantized" at load, after the export already looked correct on every
+# per-module check. That is a 15-hour mistake to discover by serving, so it is
+# checked here.
+FUSED_GROUPS = {
+    "qkv_proj": ("q_proj", "k_proj", "v_proj"),
+    "gate_up_proj": ("gate_proj", "up_proj"),
 }
 
 ap = argparse.ArgumentParser(description=__doc__,
                              formatter_class=argparse.RawDescriptionHelpFormatter)
 ap.add_argument("export_dir", help="Directory containing config.json.")
 ap.add_argument("--scope", choices=sorted(SCOPES), default="omlp",
-                help="Expected quantization scope. omlp-q also expects q_proj in NVFP4.")
+                help="Expected quantization scope. omlp keeps all of q/k/v in "
+                     "BF16; all-linear quantizes all of them. omlp-q quantizes "
+                     "only q_proj and is NOT servable by vLLM.")
 ap.add_argument("--sample-layers", type=int, default=4,
                 help="How many layers to numerically inspect block scales in.")
 args = ap.parse_args()
@@ -159,6 +180,7 @@ for module, parts in modules.items():
             kinds.setdefault(kind, []).append((module, parts))
             break
 
+kind_state = {}
 for kind in QUANTIZED + UNQUANTIZED:
     found = kinds.get(kind, [])
     if not found:
@@ -169,6 +191,7 @@ for kind in QUANTIZED + UNQUANTIZED:
     is_quant = len(with_scale) == len(found)
     is_plain = not with_scale
     state = "NVFP4" if is_quant else ("BF16" if is_plain else "MIXED")
+    kind_state[kind] = state
     line(kind, f"{state:<6} {len(found):>4} module(s)")
     print(f"      tensors: {sorted(found[0][1])}")
 
@@ -178,6 +201,27 @@ for kind in QUANTIZED + UNQUANTIZED:
     if kind in UNQUANTIZED and not is_plain:
         FAIL.append(f"{kind} must stay BF16 but {len(with_scale)} module(s) "
                     f"carry weight_scale")
+
+
+# ---------------------------------------------------------------------------
+print("\n=== Fused layer groups (vLLM servability) ===")
+for fused, members in FUSED_GROUPS.items():
+    states = {m: kind_state.get(m) for m in members if kind_state.get(m)}
+    if not states:
+        continue
+    distinct = set(states.values())
+    ok = len(distinct) == 1
+    line(fused, f"{'/'.join(sorted(distinct)):<12}",
+         "uniform" if ok else "MIXED PRECISION")
+    if not ok:
+        for m, s in states.items():
+            print(f"      {m:<12} {s}")
+        FAIL.append(
+            f"{fused} mixes precisions ({', '.join(f'{m}={s}' for m, s in states.items())}). "
+            f"vLLM fuses these into one layer and requires a single precision "
+            f"across all shards; it will refuse to load this checkpoint with "
+            f"\"Detected some but not all shards of ...{fused} are quantized\". "
+            f"Either quantize all of {', '.join(members)} or none of them.")
 
 
 # ---------------------------------------------------------------------------

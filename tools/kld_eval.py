@@ -35,6 +35,7 @@ Usage:
 
 import argparse
 import json
+import math
 import sys
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -240,6 +241,94 @@ def logsumexp(a, axis):
         np.exp(a - peak).sum(axis=axis))
 
 
+def confident_flip_rate(kept_top1, ref_conf, floor_p=0.9):
+    """Flips at near-certain positions, expressed per 10,000 generated tokens.
+
+    Percentages of a subset are hard to compare across runs whose subset sizes
+    differ. A rate over all scored positions is directly comparable and maps
+    onto something concrete: how often a confident decision changes while
+    writing.
+    """
+    sure = ref_conf > floor_p
+    flips = int((~kept_top1[sure]).sum())
+    return flips, flips / len(kept_top1) * 10000
+
+
+def score_pair(ref, cand):
+    """All per-position metrics for one candidate against the reference.
+
+    Split out so `compare` and `report` cannot drift apart: a summary table that
+    computes agreement even slightly differently from the detailed view is worse
+    than no summary table.
+    """
+    ref_ids, cand_ids = ref["top_ids"], cand["top_ids"]
+
+    # Mask padded slots so they contribute no probability mass.
+    ref_lp = np.where(ref_ids == PAD_ID, -np.inf, ref["top_lp"])
+    cand_lp = np.where(cand_ids == PAD_ID, -np.inf, cand["top_lp"])
+
+    n = len(ref_lp)
+    kld = np.empty(n, dtype=np.float64)
+    covered = np.empty(n, dtype=np.float64)
+    ref_ent = np.empty(n, dtype=np.float64)
+    cand_ent = np.empty(n, dtype=np.float64)
+
+    # Chunked: the id-matching broadcast is [chunk, k, k] and would otherwise
+    # allocate tens of GB at corpus scale.
+    step = 4096
+    for s in range(0, n, step):
+        e = min(s + step, n)
+        r_ids, r_lp = ref_ids[s:e], ref_lp[s:e].astype(np.float64)
+        c_ids, c_lp = cand_ids[s:e], cand_lp[s:e].astype(np.float64)
+
+        match = r_ids[:, :, None] == c_ids[:, None, :]
+        found = match.any(axis=2)
+        slot = match.argmax(axis=2)
+        q_lp = np.take_along_axis(c_lp, slot, axis=1)
+
+        # A reference token outside the candidate's top-k gets the candidate's
+        # smallest observed logprob. That is the most generous available bound,
+        # so a reported KLD is a floor, never an exaggeration.
+        floor = np.min(np.where(np.isfinite(c_lp), c_lp, np.inf), axis=1)
+        q_lp = np.where(found, q_lp, floor[:, None])
+        q_lp = np.where(np.isfinite(r_lp), q_lp, -np.inf)
+
+        log_p = r_lp - logsumexp(r_lp, axis=1)[:, None]
+        log_q = q_lp - logsumexp(q_lp, axis=1)[:, None]
+        p = np.exp(log_p)
+
+        terms = np.where(p > 0, p * (log_p - log_q), 0.0)
+        kld[s:e] = terms.sum(axis=1)
+        covered[s:e] = np.where(found, p, 0.0).sum(axis=1)
+
+        # Entropy of each model's own top-k, renormalized. Agreement is
+        # one-directional: it catches the candidate failing to reproduce the
+        # reference's confidence, but not the candidate becoming confident where
+        # the reference was not. That shows up here, as lower entropy.
+        ref_ent[s:e] = -np.where(p > 0, p * log_p, 0.0).sum(axis=1)
+        log_qn = c_lp - logsumexp(c_lp, axis=1)[:, None]
+        qn = np.exp(log_qn)
+        cand_ent[s:e] = -np.where(qn > 0, qn * log_qn, 0.0).sum(axis=1)
+
+    idx = np.arange(n)
+    kept_top1 = (ref_ids[idx, np.argmax(ref_lp, axis=1)]
+                 == cand_ids[idx, np.argmax(cand_lp, axis=1)])
+
+    return {
+        "n": n,
+        "kld": kld,
+        "covered": covered,
+        "kept_top1": kept_top1,
+        # ref_lp are true logprobs, not renormalized, so this is the real
+        # top-1 probability under the reference model.
+        "ref_conf": np.exp(np.max(ref_lp, axis=1)),
+        "ref_entropy": ref_ent,
+        "cand_entropy": cand_ent,
+        "ref_ppl": float(np.exp(-ref["actual_lp"].mean())),
+        "cand_ppl": float(np.exp(-cand["actual_lp"].mean())),
+    }
+
+
 def position_buckets(ref, args):
     """Per-position bucket labels, or None if they cannot be established.
 
@@ -287,52 +376,9 @@ def cmd_compare(args):
                  "positions and the comparison would be meaningless")
     line("positions", len(ref["actual_lp"]), "identical prompts")
 
-    ref_ids, ref_lp = ref["top_ids"], ref["top_lp"]
-    cand_ids, cand_lp = cand["top_ids"], cand["top_lp"]
-
-    # Mask padded slots so they contribute no probability mass.
-    ref_lp = np.where(ref_ids == PAD_ID, -np.inf, ref_lp)
-    cand_lp = np.where(cand_ids == PAD_ID, -np.inf, cand_lp)
-
-    n = len(ref_lp)
-    kld = np.empty(n, dtype=np.float64)
-    covered = np.empty(n, dtype=np.float64)
-
-    # Chunked: the id-matching broadcast is [chunk, k, k] and would otherwise
-    # allocate tens of GB at corpus scale.
-    step = 4096
-    for s in range(0, n, step):
-        e = min(s + step, n)
-        r_ids, r_lp = ref_ids[s:e], ref_lp[s:e].astype(np.float64)
-        c_ids, c_lp = cand_ids[s:e], cand_lp[s:e].astype(np.float64)
-
-        match = r_ids[:, :, None] == c_ids[:, None, :]
-        found = match.any(axis=2)
-        slot = match.argmax(axis=2)
-        q_lp = np.take_along_axis(c_lp, slot, axis=1)
-
-        # A reference token outside the candidate's top-k gets the candidate's
-        # smallest observed logprob. That is the most generous available bound,
-        # so a reported KLD is a floor, never an exaggeration.
-        floor = np.min(np.where(np.isfinite(c_lp), c_lp, np.inf), axis=1)
-        q_lp = np.where(found, q_lp, floor[:, None])
-        q_lp = np.where(np.isfinite(r_lp), q_lp, -np.inf)
-
-        log_p = r_lp - logsumexp(r_lp, axis=1)[:, None]
-        log_q = q_lp - logsumexp(q_lp, axis=1)[:, None]
-        p = np.exp(log_p)
-
-        terms = np.where(p > 0, p * (log_p - log_q), 0.0)
-        kld[s:e] = terms.sum(axis=1)
-        covered[s:e] = np.where(found, p, 0.0).sum(axis=1)
-
-    ref_top1 = ref_ids[np.arange(n), np.argmax(ref_lp, axis=1)]
-    cand_top1 = cand_ids[np.arange(n), np.argmax(cand_lp, axis=1)]
-    kept_top1 = ref_top1 == cand_top1
-
-    # Confidence of the reference at each position. ref_lp are true logprobs
-    # from the model, not renormalized, so this is the real top-1 probability.
-    ref_conf = np.exp(np.max(ref_lp, axis=1))
+    m = score_pair(ref, cand)
+    kld, covered = m["kld"], m["covered"]
+    kept_top1, ref_conf, n = m["kept_top1"], m["ref_conf"], m["n"]
 
     # This is the headline, printed first and on purpose. KL divergence measures
     # how far the distribution moved; agreement measures how often the decision
@@ -349,12 +395,28 @@ def cmd_compare(args):
             line(f"top-1 match where ref p>{floor_p}",
                  f"{kept_top1[sel].mean() * 100:6.2f}%",
                  f"{int(sel.sum())} pos, {label}")
-    print("  Read the bottom row first. Flips at near-certain positions are")
+    flips, per10k = confident_flip_rate(kept_top1, ref_conf)
+    line("confident flips / 10k tokens", f"{per10k:6.2f}",
+         f"{flips} total, one per ~{int(10000 / per10k) if per10k else 0} tokens")
+    print("  Read the bottom rows first. Flips at near-certain positions are")
     print("  capability loss; flips at low-confidence positions are mostly")
     print("  interchangeable word choice and cost you little.")
+    print("  The rate is per generated token, but scoring is teacher-forced, so")
+    print("  it counts single decisions -- not the trajectory drift that follows")
+    print("  one, which compounds over a long generation.")
 
-    ref_ppl = float(np.exp(-ref["actual_lp"].mean()))
-    cand_ppl = float(np.exp(-cand["actual_lp"].mean()))
+    # One-directional agreement blind spot: the candidate becoming confident
+    # where the reference was not.
+    r_ent, c_ent = m["ref_entropy"].mean(), m["cand_entropy"].mean()
+    print("\n=== output entropy  (flattening check) ===")
+    line("reference mean entropy", f"{r_ent:.4f} nats")
+    line("candidate mean entropy", f"{c_ent:.4f} nats",
+         f"{(c_ent / r_ent - 1) * 100:+.2f}%")
+    print("  Agreement cannot see spurious confidence. A candidate several")
+    print("  percent below the reference has narrowed its distribution, which")
+    print("  reads as flatter, more repetitive prose regardless of agreement.")
+
+    ref_ppl, cand_ppl = m["ref_ppl"], m["cand_ppl"]
 
     print("\n=== perplexity ===")
     line("reference", f"{ref_ppl:.4f}")
@@ -415,6 +477,93 @@ def cmd_compare(args):
 
 
 # ---------------------------------------------------------------------------
+# report
+
+
+def cmd_report(args):
+    """One row per candidate, ranked on the metric that matters.
+
+    Format-agnostic by construction: candidates are just .npz files collected
+    from served endpoints, so NVFP4, INT4 W4A16, FP8 and anything else compare
+    on equal terms as long as they scored the same positions.
+    """
+    ref = np.load(args.reference, allow_pickle=False)
+    ref_name = json.loads(str(ref["meta"]))["model"]
+
+    print("\n=== reference ===")
+    line("model", ref_name, str(args.reference))
+    line("positions", len(ref["actual_lp"]))
+
+    rows = []
+    for path in args.candidates:
+        cand = np.load(path, allow_pickle=False)
+        name = json.loads(str(cand["meta"]))["model"]
+        if not np.array_equal(ref["prompt_ids"], cand["prompt_ids"]):
+            print(f"\n  SKIPPED {name}: scored different positions than the "
+                  f"reference.")
+            continue
+        m = score_pair(ref, cand)
+        sure = m["ref_conf"] > 0.9
+        flips, per10k = confident_flip_rate(m["kept_top1"], m["ref_conf"])
+        rows.append({
+            "name": name,
+            # A corpus with no near-certain position yields an empty slice.
+            # Sorting and printing NaN would silently look like a real score.
+            "sure_agree": (m["kept_top1"][sure].mean() * 100
+                           if sure.any() else float("nan")),
+            "sure_n": int(sure.sum()),
+            "per10k": per10k,
+            "all_agree": m["kept_top1"].mean() * 100,
+            "ppl_delta": (m["cand_ppl"] / m["ref_ppl"] - 1) * 100,
+            "kld": m["kld"].mean(),
+            "ent_delta": (m["cand_entropy"].mean() / m["ref_entropy"].mean()
+                          - 1) * 100,
+            "covered": m["covered"].mean() * 100,
+        })
+
+    if not rows:
+        sys.exit("no candidate scored the same positions as the reference")
+
+    # Best confident agreement first: that is the decision metric, so it should
+    # not require reading down a column to find. NaN sorts last.
+    rows.sort(key=lambda r: (math.isnan(r["sure_agree"]), -r["sure_agree"]))
+
+    if not rows[0]["sure_n"]:
+        print("\n  note: no position reached >90% reference confidence, so there "
+              "is no\n  confident-agreement column to rank on. Ranking falls back "
+              "to mean KLD.")
+        rows.sort(key=lambda r: r["kld"])
+
+    print("\n=== ranked by confident agreement ===")
+    print(f"  {'candidate':<28} {'conf.agree':>10} {'flips/10k':>10} "
+          f"{'all':>7} {'PPL':>8} {'KLD':>9} {'entropy':>8}")
+    for r in rows:
+        agree = (f"{r['sure_agree']:9.3f}%" if not math.isnan(r["sure_agree"])
+                 else f"{'n/a':>10}")
+        print(f"  {r['name'][:28]:<28} {agree} "
+              f"{r['per10k']:10.2f} {r['all_agree']:6.2f}% "
+              f"{r['ppl_delta']:+7.2f}% {r['kld']:9.6f} "
+              f"{r['ent_delta']:+7.2f}%")
+
+    print("\n=== reading ===")
+    print("  conf.agree  how often the candidate reproduced a decision the")
+    print("              reference made at >90% confidence. THE metric here.")
+    print("  flips/10k   the same thing as a rate: confident decisions changed")
+    print("              per 10,000 generated tokens. Easier to reason about.")
+    print("  all         agreement over every position. Mostly counts")
+    print("              interchangeable word choice; do not rank on it.")
+    print("  entropy     candidate vs reference distribution width. Negative")
+    print("              means narrowed -> flatter, more repetitive prose.")
+    print("  KLD         entropy-confounded, so weak across domains, but the")
+    print("              best early warning that an export is structurally bad.")
+
+    worst = min(r["covered"] for r in rows)
+    if worst < 98.0:
+        print(f"\n  WARNING: one candidate covers only {worst:.2f}% of reference "
+              f"mass; re-collect with a larger -k.")
+
+
+# ---------------------------------------------------------------------------
 
 ap = argparse.ArgumentParser(description=__doc__,
                              formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -447,6 +596,12 @@ m.add_argument("--texts", default=None,
                     "labels were saved; verified against the stored prompt IDs.")
 m.add_argument("--tokenizer", default=None, help="Required with --texts.")
 m.set_defaults(func=cmd_compare)
+
+r = sub.add_parser("report", help="Rank many candidates against one reference.")
+r.add_argument("reference", help=".npz from the BF16 model.")
+r.add_argument("candidates", nargs="+",
+               help="One .npz per quantized checkpoint. Any format.")
+r.set_defaults(func=cmd_report)
 
 args = ap.parse_args()
 args.func(args)
