@@ -90,6 +90,7 @@ NVFP4 stores 4 bits per weight plus one FP8-E4M3 scale per 16-element block = 4.
 | **`omlp_only` (`behemoth_r1_123b`)** | 106.3 B | 16.3 B | **92.4 GB** | **2.48×** | yes |
 | `omlp_only` + `q_proj` (`behemoth_r1_123b_q`) | 119.6 B | 3.0 B | 73.3 GB | 3.13× | **no — see below** |
 | **all linears (`behemoth_r1_123b_qkv`)** | 121.8 B | 0.8 B | **70.1 GB** | **3.27×** | yes |
+| all linears, q/k/v weight-only (`..._qkv_a16`) | 121.8 B | 0.8 B | 70.1 GB | 3.27× | yes, untested |
 
 Two rows are confirmed by measurement rather than estimated: `omlp_only` exported at 86.1 GiB (92.41 GB decimal) and the `q_proj` variant at 68.3 GiB (73.3 GB). The predictions were exact, so treat the remaining row as reliable — all-linear should land at 65.3 GiB.
 
@@ -109,6 +110,23 @@ This is checked in `is_layer_skipped`, which compares each fused member against 
 The consequence is that for attention there are exactly **two** legal choices, all of q/k/v in BF16 or all of them in NVFP4, and nothing in between. `behemoth_r1_123b_q` violates this and is retained only as a documented dead end. `verify_nvfp4_export.py` now checks fused-group uniformity, so this fails in seconds rather than after a 15-hour run.
 
 Note why the two working scopes were never at risk: `omlp_only` quantizes `gate_proj` and `up_proj` together and leaves all of q/k/v alone, so both groups are uniform by accident of the preset's design.
+
+### NVFP4 weights do not require NVFP4 activations
+
+The rule above is about **quantized versus not quantized**, not about W4A4 versus weight-only. NVFP4 with BF16 activations is a real configuration, this repo already uses it — `models/base.py` disables `*self_attn*input_quantizer` while leaving weight quantizers on, and `glm5_1` and `qwen3_5_moe` mix the two per module — and it opens a scope the earlier framing missed.
+
+`behemoth_r1_123b_qkv_a16` drops only the q/k/v input quantizers. Every shard of the fused layer carries the same scheme, so it is legal, and it removes the reason k/v were unwanted in the first place: those two have the widest activation range per parameter in the model, and it was never their *weights* that were the concern. This quantizes the weights, which is where the bytes are, and leaves their activations in BF16. Disk cost is nil — weight bytes are identical, only the `input_scale` scalars disappear.
+
+What it costs is math throughput. Blackwell's FP4 tensor cores need both operands in FP4 (§3), so these GEMMs fall back to dequantize-and-BF16 and keep only the bandwidth win. q/k/v are ~12% of linear FLOPs per layer: close to free during bandwidth-bound decode, real during prefill. `o_proj` stays W4A4 — its input is the attention output, a different tensor, and the 86 GiB run already measured that as cheap.
+
+**A fused group must share the activation scheme too, and this failure is quieter than the precision one.** If `q_proj` were W4A4 and k/v weight-only, every shard is quantized, so vLLM's own guard says nothing while the concatenated tensor is served by a single kernel that can only apply one scheme. `verify_nvfp4_export.py` reports `NVFP4/A4`, `NVFP4/A16` or `NVFP4/A-MIXED` per projection and fails a group that mixes them.
+
+Two things to establish before trusting an export from this config, neither of which is settled:
+
+1. That ModelOpt 0.46 describes a mixed W4A4/weight-only checkpoint in a form vLLM reads correctly. It plausibly needs two `config_groups`, and the exporter has only been observed emitting one here.
+2. That the prefill regression is smaller than the accuracy gain.
+
+The cheap part is producing it: weight amaxes are unchanged from the `qkv` run and the q/k/v activation amaxes simply go unused, so the same amax file works with `--resume-amax` and the run is hours rather than days.
 
 ### Why the file is not a quarter of BF16
 

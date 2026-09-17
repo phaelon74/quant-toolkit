@@ -191,6 +191,13 @@ for kind in QUANTIZED + UNQUANTIZED:
     is_quant = len(with_scale) == len(found)
     is_plain = not with_scale
     state = "NVFP4" if is_quant else ("BF16" if is_plain else "MIXED")
+    # W4A4 and NVFP4-weight-only differ solely by the presence of input_scale.
+    # Both are legal, but a fused group cannot contain one of each: the shards
+    # are concatenated into one tensor and one kernel.
+    if is_quant:
+        acts = [m for m, p in found if "input_scale" in p]
+        state += "/A4" if len(acts) == len(found) else (
+            "/A16" if not acts else "/A-MIXED")
     kind_state[kind] = state
     line(kind, f"{state:<6} {len(found):>4} module(s)")
     print(f"      tensors: {sorted(found[0][1])}")
@@ -216,12 +223,22 @@ for fused, members in FUSED_GROUPS.items():
     if not ok:
         for m, s in states.items():
             print(f"      {m:<12} {s}")
-        FAIL.append(
-            f"{fused} mixes precisions ({', '.join(f'{m}={s}' for m, s in states.items())}). "
-            f"vLLM fuses these into one layer and requires a single precision "
-            f"across all shards; it will refuse to load this checkpoint with "
-            f"\"Detected some but not all shards of ...{fused} are quantized\". "
-            f"Either quantize all of {', '.join(members)} or none of them.")
+        detail = ", ".join(f"{m}={s}" for m, s in states.items())
+        if len({s.split("/")[0] for s in states.values()}) > 1:
+            FAIL.append(
+                f"{fused} mixes NVFP4 and BF16 shards ({detail}). vLLM fuses "
+                f"these into one layer and requires a single precision across "
+                f"all shards; it will refuse to load with \"Detected some but "
+                f"not all shards of ...{fused} are quantized\". Quantize all of "
+                f"{', '.join(members)} or none of them.")
+        else:
+            FAIL.append(
+                f"{fused} is uniformly NVFP4 but mixes activation schemes "
+                f"({detail}). The shards are concatenated into one tensor and "
+                f"served by one kernel, so W4A4 and weight-only cannot be "
+                f"combined within {'/'.join(members)}. Note this is a quieter "
+                f"failure than the precision case: every shard is quantized, so "
+                f"vLLM's own fused-layer guard does not catch it.")
 
 
 # ---------------------------------------------------------------------------

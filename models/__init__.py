@@ -1,6 +1,7 @@
 from .behemoth_r1_123b import BehemothR1_123BConfig
 from .behemoth_r1_123b_q import BehemothR1_123BQConfig
 from .behemoth_r1_123b_qkv import BehemothR1_123BQkvConfig
+from .behemoth_r1_123b_qkv_a16 import BehemothR1_123BQkvA16Config
 from .gemma4_31b import Gemma4_31BConfig
 from .glm5 import Glm5Config
 from .glm5_1 import Glm51Config
@@ -14,6 +15,7 @@ _CONFIGS = {
     "behemoth_r1_123b": BehemothR1_123BConfig,
     "behemoth_r1_123b_q": BehemothR1_123BQConfig,
     "behemoth_r1_123b_qkv": BehemothR1_123BQkvConfig,
+    "behemoth_r1_123b_qkv_a16": BehemothR1_123BQkvA16Config,
     "gemma4_31b": Gemma4_31BConfig,
     "glm5": Glm5Config,
     "glm5_1": Glm51Config,
