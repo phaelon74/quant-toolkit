@@ -33,7 +33,12 @@ for len in 4096 8192; do
     fi
 done
 
-mkdir -p "$WORK" "$(dirname "$FINAL")"
+# Outside $WORK on purpose. $WORK is renamed to $FINAL on success, so anything
+# written inside it is published with the model -- and amaxes are calibration
+# state, not weights. Keeping them here also means they survive the rename.
+AMAX=/media/fmodels2/working_Model-Opt/amax/behemoth_r1_123b.safetensors
+
+mkdir -p "$WORK" "$(dirname "$FINAL")" "$(dirname "$AMAX")"
 
 # 229 GB BF16 into 384 GB of VRAM, so no --streaming: accelerate holds the
 # whole model and calibration runs at full speed.
@@ -44,7 +49,14 @@ python quantize.py \
     --export-dir "$WORK" \
     --calib-config configs/calib_behemoth_r1_123b.toml \
     --batch-tokens 32768 \
-    --save-amax "$WORK/amax.safetensors"
+    --save-amax "$AMAX"
+
+# quantize.py checkpoints amaxes into --export-dir every few batches. That is
+# scratch state and must not ship inside the model.
+if [ -f "$WORK/amax_checkpoint.safetensors" ]; then
+    mv "$WORK/amax_checkpoint.safetensors" \
+       "$(dirname "$AMAX")/behemoth_r1_123b_checkpoint.safetensors"
+fi
 
 # Both paths live on /media/fmodels2, so this is a rename, not a copy.
 # Guard the re-run case: mv into an existing dir would nest instead of replace.

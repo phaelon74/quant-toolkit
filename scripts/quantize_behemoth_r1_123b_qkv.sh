@@ -36,7 +36,13 @@ for len in 4096 8192; do
     fi
 done
 
-mkdir -p "$WORK" "$(dirname "$FINAL")"
+# Outside $WORK on purpose. $WORK is renamed to $FINAL on success, so anything
+# written inside it is published with the model -- and amaxes are calibration
+# state, not weights. Keeping them here also means they survive the rename and
+# can be found again, which is the whole basis of the shortcut in 6.4b.
+AMAX=/media/fmodels2/working_Model-Opt/amax/behemoth_r1_123b_qkv.safetensors
+
+mkdir -p "$WORK" "$(dirname "$FINAL")" "$(dirname "$AMAX")"
 
 python quantize.py \
     --model behemoth_r1_123b_qkv \
@@ -44,7 +50,14 @@ python quantize.py \
     --export-dir "$WORK" \
     --calib-config configs/calib_behemoth_r1_123b.toml \
     --batch-tokens 32768 \
-    --save-amax "$WORK/amax.safetensors"
+    --save-amax "$AMAX"
+
+# quantize.py checkpoints amaxes into --export-dir every few batches. That is
+# scratch state and must not ship inside the model.
+if [ -f "$WORK/amax_checkpoint.safetensors" ]; then
+    mv "$WORK/amax_checkpoint.safetensors" \
+       "$(dirname "$AMAX")/behemoth_r1_123b_qkv_checkpoint.safetensors"
+fi
 
 if [ -e "$FINAL" ]; then
     echo "$FINAL already exists. Export left in $WORK; move it yourself."

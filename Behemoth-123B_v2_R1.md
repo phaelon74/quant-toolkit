@@ -370,8 +370,10 @@ python quantize.py \
     --export-dir /media/fmodels2/working_Model-Opt/Behemoth-R1-123B-v2-nvfp4 \
     --calib-config configs/calib_behemoth_r1_123b.toml \
     --batch-tokens 32768 \
-    --save-amax /media/fmodels2/working_Model-Opt/Behemoth-R1-123B-v2-nvfp4/amax.safetensors
+    --save-amax /media/fmodels2/working_Model-Opt/amax/behemoth_r1_123b.safetensors
 ```
+
+Note the amax path is **not** under the export directory. The export directory gets renamed to the final model path on success, so anything written inside it is published with the weights — and amaxes are calibration state, not part of the checkpoint.
 
 No `--streaming` (fits in VRAM). No `--floor-amaxes` (MoE-only). No `--save-quantiles` (quantile path only).
 
@@ -392,11 +394,13 @@ Widening from `q_proj` to all of q/k/v needs two amaxes per layer per projection
 
 So the 16k-sample pass can be skipped entirely:
 
+The amax file is **inside the published model directory**, not the working directory. The scripts wrote `--save-amax "$WORK/amax.safetensors"` and then renamed `$WORK` to `$FINAL` on success, so calibration state was carried into the model. Both scripts now write amaxes to `working_Model-Opt/amax/` instead, and move `amax_checkpoint.safetensors` out of the export directory before the rename — but the file from the run that already happened is at the old location:
+
 ```bash
 python tools/synth_kv_amax.py \
-    --amax /media/fmodels2/working_Model-Opt/Behemoth-R1-123B-v2-nvfp4-q/amax.safetensors \
+    --amax /media/fmodels2/TheHouseOfTheDude/Behemoth-R1-123B-v2/nvfp4-q/amax.safetensors \
     --model /media/fmodels/TheDrummer/Behemoth-R1-123B-v2 \
-    --output /media/fmodels2/working_Model-Opt/amax_qkv.safetensors
+    --output /media/fmodels2/working_Model-Opt/amax/behemoth_r1_123b_qkv.safetensors
 
 python -u quantize.py \
     --model behemoth_r1_123b_qkv \
@@ -404,7 +408,7 @@ python -u quantize.py \
     --export-dir /media/fmodels2/working_Model-Opt/Behemoth-R1-123B-v2-nvfp4-qkv \
     --calib-config configs/calib_behemoth_r1_123b.toml \
     --batch-tokens 32768 \
-    --resume-amax /media/fmodels2/working_Model-Opt/amax_qkv.safetensors \
+    --resume-amax /media/fmodels2/working_Model-Opt/amax/behemoth_r1_123b_qkv.safetensors \
     --resume-batch 999999
 ```
 
