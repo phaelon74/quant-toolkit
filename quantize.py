@@ -534,6 +534,30 @@ for name, mod in model.named_modules():
                         f"{amax.flatten()[:4].tolist()} (device={amax.device})"
                     )
 
+# The loop above only walks MoE expert ModuleLists, so on a dense model it
+# counts nothing and the summary reads 0/0/0 whatever the state of the amaxes.
+# That is worse than no diagnostic, because it looks like a clean result. Fall
+# back to every quantizer in the model.
+if not (nonzero_amax_count or zero_amax_count or nan_amax_count):
+    print("  (dense model: no MoE expert lists, inspecting all quantizers)")
+    for name, mod in model.named_modules():
+        if not hasattr(mod, "_amax"):
+            continue
+        amax = mod._amax
+        if amax is None:
+            continue
+        if torch.isnan(amax).any():
+            nan_amax_count += 1
+        elif (amax == 0).all():
+            zero_amax_count += 1
+        else:
+            nonzero_amax_count += 1
+        if len(sample_lines) < 6:
+            sample_lines.append(
+                f"  {name}._amax = {amax.flatten()[:4].tolist()} "
+                f"(device={amax.device})"
+            )
+
 for line in sample_lines:
     print(line)
 print(f"\n  Summary: {nonzero_amax_count} nonzero, {zero_amax_count} zero, {nan_amax_count} NaN")

@@ -414,7 +414,17 @@ python -u quantize.py \
 
 `--resume-batch` past the batch count skips every forward pass, leaving load, weight quantization and export — a couple of hours instead of fifteen. The tool reads ModelOpt's amax shape conventions off the `q_proj` entries rather than assuming them, and refuses to write if a key is missing, a layout is unrecognised, or the file already carries k/v amaxes.
 
-**The check that this worked is already in `quantize.py`.** Its post-calibration diagnostic must report **1232 nonzero, 0 zero, 0 NaN**. A non-zero "zero" count means an amax did not restore, and the export would be silently wrong — stop there and calibrate normally rather than exporting.
+Three log lines decide whether this worked. All of them must be right before the export is trusted, because a restore that silently misses quantizers produces a checkpoint that verifies clean and is quietly wrong:
+
+| Line | Expected |
+| --- | --- |
+| `Restored N/1232 calibrator amaxes` | **1232/1232.** Anything less means module names did not match. |
+| `Summary: N nonzero, N zero, N NaN` | **1232 nonzero, 0 zero, 0 NaN**, preceded by `(dense model: ...)`. |
+| `Saved N amax values` | **1232**, with no `WARNING` lines after it. |
+
+The middle one needed a fix to be worth reading. That diagnostic only walked MoE expert `ModuleList`s, so on a dense model like this one it counted nothing and printed `0 nonzero, 0 zero, 0 NaN` regardless of the actual state — a passing-looking result that meant nothing. It now falls back to every quantizer in the model when no expert lists are found.
+
+Note that `method = "mse"` still does its full weight-scale sweep on this run. That is the point: the sweep is data-free, it is where NVFP4 weight quality comes from, and skipping calibration does not skip it. Expect the run to cost model load, a pointless but harmless tokenization pass over the calibration JSONL, the MSE sweep, and the export.
 
 Expected log landmarks:
 
