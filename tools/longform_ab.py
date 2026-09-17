@@ -163,8 +163,13 @@ def generate_story(session, args, spec, premise):
     target = spec["target_words"]
     pid = premise["id"]
 
-    # ~1.6 tokens/word plus headroom; chapters overrun their target routinely.
-    chapter_tokens = int(target * 1.6 * 1.6)
+    # Headroom has to be generous, not merely adequate. Measured at 2.56x target
+    # every one of 96 chapters stopped on finish_reason=length, which makes
+    # chapter length a readout of this ceiling rather than of the model, voids
+    # length adherence as a metric, and leaves every chapter ending mid-sentence
+    # for whoever reads the blind pairs. Overshooting the target is itself the
+    # signal worth measuring, so the cap exists only to bound the context.
+    chapter_tokens = args.chapter_tokens or int(target * 4.0)
 
     convo = []
     steps = []
@@ -509,8 +514,12 @@ def cmd_metrics(args):
     print("\n=== summary ===")
     line("total words", sum(r["total_words"] for r in results))
     line("mean chapter words", f"{avg('chapter_words_mean'):.0f}")
-    line("length MAE", f"{avg('length_mae_pct'):.1f}%")
-    line("truncated chapters", sum(r["truncated_chapters"] for r in results))
+    n_chapters = sum(r["chapters"] for r in results)
+    n_trunc = sum(r["truncated_chapters"] for r in results)
+    trunc_pct = 100.0 * n_trunc / max(1, n_chapters)
+    line("length MAE", f"{avg('length_mae_pct'):.1f}%",
+         "UNRELIABLE, see below" if trunc_pct > 25 else "")
+    line("truncated chapters", f"{n_trunc}/{n_chapters}", f"{trunc_pct:.0f}%")
     line("MATTR-500", f"{avg('mattr_500'):.4f}")
     line("MTLD", f"{avg('mtld'):.1f}")
     line("distinct-4", f"{avg('distinct_4'):.4f}")
@@ -525,6 +534,13 @@ def cmd_metrics(args):
         line("name variants", sum(r["entities"]["name_variants"]
                                  for r in results))
         line("cast coverage", f"{sum(r['entities']['cast_coverage'] for r in results) / len(results) * 100:.1f}%")
+
+    if trunc_pct > 25:
+        print(f"\n  {trunc_pct:.0f}% of chapters stopped on finish_reason=length,")
+        print("  so chapter length reflects --chapter-tokens rather than the")
+        print("  model, and length MAE above measures the ceiling. Chapters also")
+        print("  end mid-sentence, which contaminates the blind pairs. Raise")
+        print("  --chapter-tokens and regenerate before comparing runs.")
 
     if looped:
         print("\n  A repetition loop disqualifies a checkpoint on its own.")
@@ -781,6 +797,13 @@ g.add_argument("--seed-salt", default="v1",
                help="Change to get a different but still reproducible draw. "
                     "Must match across checkpoints being compared.")
 g.add_argument("--plan-tokens", type=int, default=3000)
+g.add_argument("--chapter-tokens", type=int, default=None,
+               help="Per-chapter max_tokens. Defaults to 4x target_words, which "
+                    "is meant to be slack enough that chapters end because the "
+                    "model finished. If `metrics` reports most chapters "
+                    "truncated, raise this -- but keep chapters x this value "
+                    "under the server's --max-model-len, since context is "
+                    "cumulative.")
 g.add_argument("--concurrency", type=int, default=4)
 g.add_argument("--timeout", type=int, default=1800)
 g.add_argument("--overwrite", action="store_true")
