@@ -88,21 +88,48 @@ scales = fetch(exp_idx, [f"{p}.weight_scale_2" for p in paths.values()]
                + [f"{p}.input_scale" for p in paths.values()])
 weights = fetch(src_idx, [f"{p}.weight" for p in paths.values()])
 
+MEMBER_OF = {m: g for g, ms in FUSED.items() for m in ms}
+
 # ---------------------------------------------------------------------------
-print("=== weight_scale_2 versus source absmax ===")
-print(f"{'kind':<12}{'layer':>6}{'weight_scale_2':>17}{'src absmax':>14}{'ratio':>13}")
+# The basis a projection's weight_scale_2 should be derived from. For a fused
+# group that is the largest absmax in the group, not the projection's own: the
+# group shares one scale at serve time, so quantize.py ties their amaxes to the
+# max. Measuring each projection against its own absmax makes a correctly tied
+# group look wrong and an incorrectly untied one look right, which is exactly
+# backwards.
+absmax = {}
+for (i, kind), p in paths.items():
+    w = weights.get(f"{p}.weight")
+    if w is not None:
+        absmax[(i, kind)] = float(w.to(torch.float32).abs().max())
+
+basis = {}
+for (i, kind) in absmax:
+    group = MEMBER_OF.get(kind)
+    if group:
+        peers = [absmax[(i, m)] for m in FUSED[group] if (i, m) in absmax]
+        basis[(i, kind)] = max(peers) if peers else absmax[(i, kind)]
+    else:
+        basis[(i, kind)] = absmax[(i, kind)]
+
+print("=== weight_scale_2 versus the basis it should derive from ===")
+print("  (fused groups share one scale, so their basis is the group's max absmax)")
+print(f"\n{'kind':<12}{'layer':>6}{'weight_scale_2':>17}{'own absmax':>13}"
+      f"{'basis':>13}{'ratio':>13}")
 ratios = defaultdict(list)
 missing = []
 for (i, kind), p in sorted(paths.items(), key=lambda kv: (kv[0][1], kv[0][0])):
-    ws2, w = scales.get(f"{p}.weight_scale_2"), weights.get(f"{p}.weight")
-    if ws2 is None or w is None:
+    ws2 = scales.get(f"{p}.weight_scale_2")
+    if ws2 is None or (i, kind) not in absmax:
         missing.append(p)
         continue
     ws2 = float(ws2.float().reshape(-1)[0])
-    absmax = float(w.to(torch.float32).abs().max())
-    r = ws2 / absmax if absmax else float("nan")
+    b = basis[(i, kind)]
+    r = ws2 / b if b else float("nan")
     ratios[kind].append(r)
-    print(f"{kind:<12}{i:>6}{ws2:>17.6g}{absmax:>14.6g}{r:>13.6g}")
+    mark = "" if abs(absmax[(i, kind)] - b) < 1e-12 else "  (tied up)"
+    print(f"{kind:<12}{i:>6}{ws2:>17.6g}{absmax[(i, kind)]:>13.6g}"
+          f"{b:>13.6g}{r:>13.6g}{mark}")
 
 if missing:
     print(f"\n  missing from one side: {len(missing)}  e.g. {missing[:3]}")
@@ -128,21 +155,41 @@ print(f"\n  all-kind median ratio        {overall:.6g}")
 print(f"  implied constant             {1 / overall:.1f}   (ModelOpt NVFP4 uses 6*448 = 2688)")
 
 # ---------------------------------------------------------------------------
-print("\n=== input_scale, and fused-group sharing ===")
-for fused, members in FUSED.items():
-    print(f"  {fused}")
-    for i in layers:
-        vals = {}
-        for m in members:
-            t = scales.get(f"{paths[(i, m)]}.input_scale")
-            if t is not None:
-                vals[m] = float(t.float().reshape(-1)[0])
-        if not vals:
-            continue
-        spread = (max(vals.values()) - min(vals.values())) / max(vals.values())
-        note = "identical" if spread < 1e-6 else f"spread {spread:.2%}"
-        print(f"    layer {i:<3} " + "  ".join(f"{m.split('_')[0]}={v:.6g}"
-                                              for m, v in vals.items()) + f"   {note}")
+def group_spread(kind_of_scale):
+    """Per fused group and layer, how far apart its members' scales are."""
+    rows, untied = [], defaultdict(int)
+    for fused, members in FUSED.items():
+        for i in layers:
+            vals = {}
+            for m in members:
+                t = scales.get(f"{paths[(i, m)]}.{kind_of_scale}")
+                if t is not None:
+                    vals[m] = float(t.float().reshape(-1)[0])
+            if len(vals) < 2:
+                continue
+            hi = max(vals.values())
+            spread = (hi - min(vals.values())) / hi if hi else 0.0
+            if spread > 1e-6:
+                untied[fused] += 1
+            rows.append((fused, i, vals, spread))
+    return rows, untied
+
+
+print("\n=== fused groups must share weight_scale_2 ===")
+print("  vLLM serves each group from one concatenated tensor with one scale.")
+ws2_rows, ws2_untied = group_spread("weight_scale_2")
+for fused, i, vals, spread in ws2_rows:
+    note = "tied" if spread <= 1e-6 else f"UNTIED  spread {spread:.1%}"
+    print(f"  {fused:<14} layer {i:<3} "
+          + "  ".join(f"{m.split('_')[0]}={v:.4g}" for m, v in vals.items())
+          + f"   {note}")
+
+print("\n=== input_scale sharing (informational) ===")
+for fused, i, vals, spread in group_spread("input_scale")[0]:
+    note = "identical" if spread <= 1e-6 else f"spread {spread:.2%}"
+    print(f"  {fused:<14} layer {i:<3} "
+          + "  ".join(f"{m.split('_')[0]}={v:.4g}" for m, v in vals.items())
+          + f"   {note}")
 
 # ---------------------------------------------------------------------------
 if args.compare:
@@ -167,13 +214,23 @@ if args.compare:
 
 # ---------------------------------------------------------------------------
 print("\n=== verdict ===")
-if suspect:
-    print("  Scales are NOT internally consistent. These kinds derive their")
-    print("  weight_scale_2 differently from the rest of the model:")
+if ws2_untied:
+    for fused, n in ws2_untied.items():
+        print(f"  {fused} is UNTIED in {n} of {len(layers)} sampled layer(s).")
+    print("\n  This is fatal and silent. The group is concatenated into one")
+    print("  tensor served with one weight_scale_2, so the shards that lost the")
+    print("  max are dequantized against a scale that is wrong for them by")
+    print("  whatever factor their amaxes differed by. Nothing in the export")
+    print("  looks malformed; the model just produces noise.")
+    print("\n  Fix at quantization time, not by patching the export: quantize.py")
+    print("  ties each fused group's weight amaxes to their max before export.")
+    print("  Re-run with --resume-amax; the amaxes themselves are fine.")
+elif suspect:
+    print("  Fused groups are tied, but these kinds derive weight_scale_2 from")
+    print("  something other than the basis every other projection uses:")
     for kind, rel in suspect:
         print(f"    {kind:<12} {rel:.4f}x the others")
-    print("  That is a broken export, not a quantization-quality result.")
 else:
-    print("  Every projection shares one weight_scale_2 / absmax ratio, so the")
-    print("  scales are internally consistent and the amaxes behaved. A bad")
-    print("  score is then about quantization or serving, not scale derivation.")
+    print("  Every projection derives weight_scale_2 from the same basis at the")
+    print("  same ratio, and every fused group shares one scale. Scale")
+    print("  derivation is sound; a bad score is about something else.")

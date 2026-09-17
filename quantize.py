@@ -607,15 +607,27 @@ if args.floor_amaxes:
 # Tie gate/up projection weight quantizer amaxes for fused w13 export.
 # ---------------------------------------------------------------------------
 
-def _tie_pair(gq, uq):
-    if gq is None or uq is None:
+def _tie_group(quantizers):
+    """Force one weight amax across projections that get fused at serve time.
+
+    A fused layer carries a single weight_scale_2. vLLM takes one shard's value
+    and applies it to the whole concatenated tensor, so shards that disagree are
+    served against a scale that is wrong for them -- silently, and by whatever
+    factor their amaxes happened to differ by.
+    """
+    qs = [q for q in quantizers if q is not None and hasattr(q, "_amax")]
+    if len(qs) < 2:
         return False
-    if not hasattr(gq, "_amax") or not hasattr(uq, "_amax"):
-        return False
-    shared = torch.max(gq._amax, uq._amax)
-    gq._amax.copy_(shared)
-    uq._amax.copy_(shared)
+    shared = qs[0]._amax
+    for q in qs[1:]:
+        shared = torch.max(shared, q._amax)
+    for q in qs:
+        q._amax.copy_(shared)
     return True
+
+
+def _tie_pair(gq, uq):
+    return _tie_group([gq, uq])
 
 
 tied = 0
@@ -641,6 +653,21 @@ for name, mod in model.named_modules():
         ):
             tied += 1
 print(f"Tied gate/up weight_quantizer amax for {tied} experts.")
+
+# q/k/v are fused into one QKVParallelLinear the same way gate/up are fused into
+# w13, and need the same treatment. Only reachable when attention is actually
+# quantized -- disabled quantizers have no _amax and are skipped -- which is why
+# this went unnoticed until an adapter put q/k/v in scope. GQA makes it severe
+# rather than marginal: v_proj's weight range can be an order of magnitude below
+# q_proj's, so an untied group hands v_proj a scale that is 10x too coarse.
+tied_qkv = 0
+for name, mod in model.named_modules():
+    if not all(hasattr(mod, p) for p in ("q_proj", "k_proj", "v_proj")):
+        continue
+    if _tie_group([getattr(getattr(mod, p), "weight_quantizer", None)
+                   for p in ("q_proj", "k_proj", "v_proj")]):
+        tied_qkv += 1
+print(f"Tied q/k/v weight_quantizer amax for {tied_qkv} attention block(s).")
 
 
 # ---------------------------------------------------------------------------
