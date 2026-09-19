@@ -405,8 +405,18 @@ def entity_drift(nlp, profile_text, chapter_texts):
                 cast.add(name)
 
     # Individual tokens of established names count as known: "Corvane" should
-    # match "Corvane Adler" without being reported as an invention.
-    cast_tokens = {t for name in cast for t in name.split() if len(t) > 2}
+    # match "Corvane Adler" without being reported as an invention. Each token
+    # is mapped back to the member it belongs to, because coverage has to count
+    # characters reached, not surface forms matched -- otherwise a cast of one
+    # referred to as "Corvane", "Adler" and "Corvane Adler" scores 300%.
+    # A token shared by two members credits both: under-counting a character
+    # only ever called by a shared surname is the worse error.
+    token_owner = {}
+    for name in cast:
+        for tok in name.split():
+            if len(tok) > 2:
+                token_owner.setdefault(tok, set()).add(name)
+    cast_tokens = set(token_owner)
 
     unknown, variants, seen = {}, {}, set()
     for text in chapter_texts:
@@ -416,8 +426,11 @@ def entity_drift(nlp, profile_text, chapter_texts):
             name = clean_name(ent.text)
             if len(name) <= 2:
                 continue
-            if name in cast or name in cast_tokens:
+            if name in cast:
                 seen.add(name)
+                continue
+            if name in token_owner:
+                seen.update(token_owner[name])
                 continue
             near = max(cast_tokens | cast,
                        key=lambda c: SequenceMatcher(None, name.lower(),
