@@ -37,6 +37,25 @@ def filler(tokens, seed=7):
     return " ".join(words)
 
 
+def served_root(args):
+    """The filesystem path the server actually has open for this model name.
+
+    A served name is just a label, so the same name can point at a different
+    checkpoint after any re-serve. vLLM reports the real path in the model
+    card's `root`, which is the only way to tell from the client side that you
+    are scoring the file you think you are.
+    """
+    try:
+        cards = requests.get(f"{args.base_url}/models", timeout=30).json()["data"]
+    except Exception as exc:
+        return f"<could not query /v1/models: {exc}>"
+    for card in cards:
+        if card.get("id") == args.model:
+            return card.get("root") or "<no root reported>"
+    return f"<{args.model} not served; served: " \
+           f"{', '.join(repr(c.get('id')) for c in cards)}>"
+
+
 def once(args, body):
     resp = requests.post(f"{args.base_url}/chat/completions", json=body,
                          headers={"Authorization": f"Bearer {args.api_key}"},
@@ -64,8 +83,10 @@ def main():
 
     print(f"model {args.model}, {args.trials} trials, "
           f"~{args.prompt_tokens} prompt tokens, {args.max_tokens} generated")
+    print(f"served from {served_root(args)}")
 
     mismatches = 0
+    sample = None
     for trial in range(args.trials):
         prompt = (f"{filler(args.prompt_tokens, seed=trial)}\n\n"
                   "Ignore the word list above. Write the opening of a story "
@@ -77,6 +98,7 @@ def main():
                 "min_p": args.min_p,
                 "seed": 1000 + trial}
         a, b = once(args, body), once(args, body)
+        sample = sample or a
         ha = hashlib.sha256(a.encode()).hexdigest()[:12]
         hb = hashlib.sha256(b.encode()).hexdigest()[:12]
         ok = ha == hb
@@ -87,6 +109,12 @@ def main():
                           min(len(a), len(b)))
             note = f"  diverged at char {common} of {min(len(a), len(b))}"
         print(f"  trial {trial}: {'OK  ' if ok else 'DIFF'} {ha} {hb}{note}")
+
+    # A broken export is perfectly reproducible, so the hashes above say nothing
+    # about whether the checkpoint works. Print prose and read it.
+    if sample:
+        print("\n--- first 400 chars of output; this must read as English ---")
+        print(sample[:400].replace("\n", " "))
 
     print()
     if mismatches:
