@@ -1,0 +1,399 @@
+calibration_set:
+  _templates:
+    programming_languages: &programming_languages "Solve the following problem using {{ ['Zephyr', 'Prolog', 'Cobol', 'Apex', 'Crystal', 'Fortran', 'Nim', 'Delphi', 'Ada', 'Objective-C', 'VBA', 'Perl', 'Groovy', 'MATLAB', 'Solidity', 'Visual Basic', 'OCaml', 'Erlang', 'Julia', 'Lisp', 'F#', 'Clojure', 'GDScript', 'Scala', 'R', 'Haskell', 'Ruby', 'Elixir', 'Lua', 'Zig', 'Dart', 'Swift', 'Metal', 'PowerShell', 'PHP', 'Kotlin', 'C', 'Java', 'C++', 'C#', 'Bash/Shell', 'Go', 'Rust', 'TypeScript', 'HTML/CSS', 'SQL', 'JavaScript', 'Python', 'Lean', 'Coq', 'Pony', 'D', 'Racket', 'Haxe', 'x86-64 ASM', 'ARM-64 ASM', 'LLVM IR', 'GLSL', 'CUDA', 'Vulkan'][hash(row|string) % 60] }}\n***\n"
+
+  # =====================================================
+  # Qwen3.8-27B GENERAL-PURPOSE CALIBRATION
+  # For INT8 W8A8 (AutoRound) on Ampere
+  #
+  # Mix follows how Qwen positions this model rather than
+  # any single workload. Per its card, Qwen3.8-27B is a
+  # native VLM with thinking on by default, built for
+  # "coding, professional work, research, and long-horizon
+  # agentic tasks", and its published benchmarks cover
+  # agentic coding (SWE-bench Pro, Terminal-Bench, DeepSWE),
+  # long-horizon office work spanning CS/finance/law/medical
+  # (CoWorkBench), instruction following (IFBench 79.5 —
+  # its strongest general score), scientific and
+  # multidisciplinary reasoning (GPQA Diamond, HLE), and
+  # competitive coding (LiveCodeBench v6 90.3).
+  #
+  # Coding drops from 65% (SWE recipe) to 29%; the freed
+  # budget goes to agentic/tool use, instruction following,
+  # reasoning, and the professional domains the model was
+  # explicitly measured on.
+  # =====================================================
+
+  max_seq_length: 8192      # was 2048: the recurrent GDN layers need long-context activation ranges
+  shuffle: true
+  seed: 42
+  num_samples: 512
+
+  # =====================================================
+  # Category Summary (Total: 512 samples)
+  # =====================================================
+  # Coding / SWE / DevOps        150 - 29.3%
+  # Agentic & tool use            95 - 18.6%
+  # Reasoning (sci/math/CoT)      75 - 14.6%
+  # Professional domains          55 - 10.7%
+  # Instruction following         40 -  7.8%
+  # Long documents                35 -  6.8%
+  # General chat                  20 -  3.9%
+  # Creative writing              20 -  3.9%
+  # Multilingual                  12 -  2.3%
+  # Commonsense / theory of mind  10 -  2.0%
+  # =====================================================
+
+  datasets:
+
+    # ==========================================================
+    # Coding / Software engineering / DevOps - 150 samples
+    # Still the largest block: agentic coding is the headline
+    # capability. Breadth across languages, repos and terminals.
+    # ==========================================================
+
+    - dataset: rombodawg/code_bagel_hermes-2.5
+      split: train
+      columns: [input, output]
+      formatter: prompt_answer
+      num_samples: 25
+
+    - dataset: nvidia/OpenCodeInstruct
+      split: train
+      columns: [input, output]
+      formatter: prompt_answer
+      num_samples: 20
+      streaming: true
+
+    - dataset: diversoailab/humaneval-rust
+      split: train
+      columns: [prompt]
+      formatter: raw_text
+      num_samples: 20
+      formatter_params:
+        prefix: *programming_languages
+
+    - dataset: CSJianYang/CodeArena
+      split: test                 # FIXED: this dataset has no 'train' split
+      columns: [messages]
+      formatter: chat_completion
+      num_samples: 15
+
+    - dataset: deepmind/code_contests
+      split: train
+      columns: [name]
+      formatter: deepmind_code_contests
+      num_samples: 15
+      streaming: true
+
+    - dataset: nvidia/Llama-Nemotron-Post-Training-Dataset
+      split: code
+      columns: [input]
+      formatter: chat_completion
+      num_samples: 15
+      streaming: true
+
+    - dataset: ammarnasr/the-stack-rust-clean
+      split: train
+      columns: [content]
+      formatter: raw_text
+      num_samples: 10
+      streaming: true
+      formatter_params:
+        prefix: "Explain this code and comment it for a junior dev.\n***\n"
+
+    - dataset: dh02391735/stackoverflow-kubernetes-questions
+      split: train
+      columns: [instruction]
+      formatter: raw_text
+      num_samples: 10
+
+    - dataset: nvidia/Nemotron-Competitive-Programming-v1
+      split: competitive_coding_cpp_part_00
+      columns: [messages]
+      formatter: chat_completion
+      num_samples: 10
+
+    - dataset: sr5434/CodegebraGPT_data
+      subset: 100k-text
+      split: train
+      columns: [conversations]
+      formatter: sharegpt
+      num_samples: 10
+
+
+    # ==========================================================
+    # Agentic & tool use - 95 samples
+    # Tool calling, environment feedback, multi-step execution.
+    #
+    # STRONGLY RECOMMENDED: replace part of this block with
+    # self-generated traces from your own W8A16 server, so the
+    # tool-call syntax and <think> blocks match what we serve.
+    # Uncomment the local source below once you have them.
+    # ==========================================================
+
+    - dataset: interstellarninja/hermes_reasoning_tool_use
+      split: train
+      columns: [conversations]
+      formatter: sharegpt
+      num_samples: 60
+
+    # Self-generated agent transcripts (JSONL with a "messages" list).
+    # Produce with the production server at thinking defaults, then:
+    # - dataset: json
+    #   data_files: ./self_traces_agent.jsonl
+    #   split: train
+    #   columns: [messages]
+    #   formatter: chat_completion
+    #   num_samples: 35
+
+    # Placeholder until the self-generated set exists: long-horizon
+    # office/professional work, the CoWorkBench/JobBench shape.
+    - dataset: neuralmagic/calibration
+      subset: LLM
+      split: train
+      columns: [messages]
+      formatter: chat_completion
+      num_samples: 20
+
+    - dataset: nvidia/Llama-Nemotron-Post-Training-Dataset
+      split: chat
+      columns: [input]
+      formatter: chat_completion
+      num_samples: 15
+      streaming: true
+
+
+    # ==========================================================
+    # Reasoning: scientific, mathematical, multidisciplinary - 75
+    # GPQA Diamond 89.2 and HLE 30.8 sit here; thinking mode is
+    # on by default, so reasoning-heavy text matters.
+    # ==========================================================
+
+    - dataset: nvidia/OpenScienceReasoning-2
+      split: train
+      columns: [input, output]
+      formatter: prompt_answer
+      num_samples: 15
+      streaming: true
+
+    - dataset: nvidia/OpenMathReasoning
+      split: cot
+      columns: [problem, generated_solution]
+      formatter: prompt_answer
+      num_samples: 15
+      streaming: true
+
+    - dataset: AI-MO/NuminaMath-CoT
+      split: train
+      columns: [problem, solution]
+      formatter: prompt_answer
+      num_samples: 10
+
+    - dataset: MegaScience/MegaScience
+      split: train
+      columns: [question, answer]
+      formatter: prompt_answer
+      num_samples: 10
+      streaming: true
+
+    - dataset: garage-bAInd/Open-Platypus
+      split: train
+      columns: [instruction, output]
+      formatter: prompt_answer
+      num_samples: 10
+
+    - dataset: camel-ai/physics
+      split: train
+      columns: [message_1, message_2]
+      formatter: prompt_answer
+      num_samples: 8
+
+    - dataset: camel-ai/chemistry
+      split: train
+      columns: [message_1, message_2]
+      formatter: prompt_answer
+      num_samples: 7
+
+
+    # ==========================================================
+    # Professional domains - 55 samples
+    # CoWorkBench measures long-horizon work across computer
+    # science, finance, law and medical; JobBench covers
+    # professional job tasks. Neither is exercised by code data.
+    # ==========================================================
+
+    - dataset: Alignment-Lab-AI/Lawyer-Instruct
+      split: train
+      columns: [instruction, output]
+      formatter: prompt_answer
+      num_samples: 12
+
+    - dataset: OpenMed/Medical-Reasoning-SFT-GPT-OSS-120B
+      split: train
+      columns: [messages]
+      formatter: chat_completion
+      num_samples: 12
+      streaming: true
+
+    - dataset: gbharti/finance-alpaca
+      split: train
+      columns: [instruction, output]
+      formatter: prompt_answer
+      num_samples: 10
+
+    - dataset: vladlen32230/summarization-yahoo-stock-finance-article-text
+      split: train
+      columns: [text]
+      formatter: raw_text
+      num_samples: 8
+      formatter_params:
+        prefix: "Summarize this:\n***\n"
+
+    - dataset: theoldmandthesea/17k_business_book
+      split: train
+      columns: [question, answer]
+      formatter: prompt_answer
+      num_samples: 8
+
+    - dataset: fka/awesome-chatgpt-prompts
+      split: train
+      columns: [prompt]
+      formatter: raw_text
+      num_samples: 5
+
+
+    # ==========================================================
+    # Instruction following - 40 samples
+    # IFBench 79.5 is this model's strongest general score and
+    # the capability an agent stack leans on hardest.
+    # ==========================================================
+
+    - dataset: HuggingFaceH4/ultrachat_200k
+      split: train_sft
+      columns: [messages]
+      formatter: chat_completion
+      num_samples: 16
+
+    - dataset: HuggingFaceH4/no_robots
+      split: train
+      columns: [messages]
+      formatter: chat_completion
+      num_samples: 12
+
+    - dataset: databricks/databricks-dolly-15k
+      split: train
+      columns: [instruction, response]
+      formatter: prompt_answer
+      num_samples: 12
+
+
+    # ==========================================================
+    # Long documents - 35 samples
+    # The only sources that reliably fill an 8K window. These
+    # carry the long-context activation ranges the Gated
+    # DeltaNet layers accumulate state over.
+    # ==========================================================
+
+    - dataset: ccdv/pubmed-summarization
+      subset: section
+      split: train
+      columns: [article]
+      formatter: raw_text
+      num_samples: 12
+      streaming: true
+      formatter_params:
+        prefix: "Summarize this:\n***\n"
+
+    - dataset: fabiochiu/medium-articles
+      split: train
+      columns: [content, title]
+      formatter: raw_text
+      num_samples: 10
+      streaming: true
+
+    - dataset: sgoel9/paul_graham_essays
+      split: train
+      columns: [text, title]
+      formatter: raw_text
+      num_samples: 8
+
+    - dataset: KaraKaraWitch/TvTroper-2025
+      split: train
+      columns: [article]
+      formatter: raw_text
+      num_samples: 5
+      formatter_params:
+        prefix: "Explain this trope like I'm your grandmother\n***\n"
+
+
+    # ==========================================================
+    # General chat & helpfulness - 20 samples
+    # ==========================================================
+
+    - dataset: nvidia/HelpSteer
+      split: train
+      columns: [prompt, response]
+      formatter: prompt_answer
+      num_samples: 12
+
+    - dataset: FreedomIntelligence/SocraticChat
+      split: train
+      columns: [conversations]
+      formatter: sharegpt
+      num_samples: 8
+
+
+    # ==========================================================
+    # Creative writing - 20 samples
+    # Prose quality degrades first under aggressive quantization
+    # and no benchmark in the card would catch it.
+    # ==========================================================
+
+    - dataset: Gryphe/Opus-WritingPrompts
+      split: train
+      columns: [conversations]
+      formatter: sharegpt
+      num_samples: 8
+
+    - dataset: anthracite-org/nopm_claude_writing_fixed
+      split: train
+      columns: [conversations]
+      formatter: sharegpt
+      num_samples: 6
+
+    - dataset: euclaise/writingprompts
+      split: train
+      columns: [prompt, story]
+      formatter: prompt_answer
+      num_samples: 6
+
+
+    # ==========================================================
+    # Multilingual - 12 samples
+    # Raise this if you work in non-English languages; the card
+    # lists multilingual generation as a supported use case.
+    # ==========================================================
+
+    - dataset: HuggingFaceH4/Multilingual-Thinking
+      split: train
+      columns: [user]
+      formatter: raw_text
+      num_samples: 12
+
+
+    # ==========================================================
+    # Commonsense / theory of mind - 10 samples
+    # ==========================================================
+
+    - dataset: PJMixers/grimulkan_physical-reasoning-ShareGPT
+      split: train
+      columns: [conversations]
+      formatter: sharegpt
+      num_samples: 5
+
+    - dataset: PJMixers/grimulkan_theory-of-mind-ShareGPT
+      split: train
+      columns: [conversations]
+      formatter: sharegpt
+      num_samples: 5
